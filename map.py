@@ -368,77 +368,117 @@ if heat_data:
     ).add_to(m2)
 
 # -----------------------------------
-# # -----------------------------------
-# [신규 기능] 반경 100m 사고다발 10개소 레이어 (파란색 역삼각형 아이콘)
+# 반경 100m 사고다발 TOP 10 표시
+# 파란색 반경 원 + 원형 순위 배지
 # -----------------------------------
 top10_df = get_top10_hotspots_100m(filtered_df)
 
 if not top10_df.empty:
     hotspot_layer = folium.FeatureGroup(
-        name='🔥 반경 100m 최다발 10개소', show=True
+        name="사고다발지점 TOP 10",
+        show=True,
     )
 
     for rank, (_, row) in enumerate(top10_df.iterrows(), start=1):
-        lat = row['latitude']
-        lon = row['longitude']
-        count = row['nearby_100m_count']
+        lat = row["latitude"]
+        lon = row["longitude"]
+        count = int(row["nearby_100m_count"])
 
-        # 1. 반경 100m 파란색 원
+        # 데이터가 없거나 NaN인 경우 빈 문자열로 처리
+        location_name = row.get("legaldong_name", "")
+        main_cause = row.get("acdnt_mdclrg_violt_1_dc", "")
+
+        if pd.isna(location_name):
+            location_name = ""
+
+        if pd.isna(main_cause):
+            main_cause = ""
+
+        # 사고다발지점 반경 100m 표시
         folium.Circle(
             location=[lat, lon],
             radius=100,
-            color='#1565C0',  # 짙은 파란색 테두리
-            fill=True,
-            fill_color='#42A5F5',  # 밝은 파란색 채우기
-            fill_opacity=0.30,
+            color="#1565C0",
             weight=2,
-            tooltip=f'<b>[{rank}위 사고다발구역]</b><br>반경 100m 내 총 {count}건 발생',
+            fill=True,
+            fill_color="#42A5F5",
+            fill_opacity=0.25,
+            tooltip=folium.Tooltip(
+                f"<b>{rank}위 사고다발지점</b><br>"
+                f"반경 100m 내 사고 {count}건",
+                sticky=True,
+            ),
         ).add_to(hotspot_layer)
 
-        # 2. 역삼각형 커스텀 HTML 아이콘 (파란색 뱃지)
-        popup_text = f"""
-        <div style="font-size:12px; width:180px;">
-            <b>🚨 사고다발 TOP {rank}</b><br>
-            <b>위치:</b> {row.get('legaldong_name', '')}<br>
-            <b>100m 내 사고:</b> <span style="color:#1565C0; font-weight:bold;">{count}건</span><br>
-            <b>주요 원인:</b> {row.get('acdnt_mdclrg_violt_1_dc', '')}
+        # 사고다발지점 클릭 시 표시할 팝업
+        popup_html = f"""
+        <div style="
+            width: 220px;
+            font-size: 13px;
+            line-height: 1.7;
+            font-family: Arial, sans-serif;
+        ">
+            <div style="
+                color: #1565C0;
+                font-size: 15px;
+                font-weight: bold;
+                margin-bottom: 6px;
+            ">
+                사고다발지점 TOP {rank}
+            </div>
+
+            <b>위치</b> : {location_name}<br>
+            <b>반경</b> : 100m<br>
+            <b>사고건수</b> :
+            <span style="
+                color: #1565C0;
+                font-weight: bold;
+            ">
+                {count}건
+            </span><br>
+            <b>주요 원인</b> : {main_cause}
         </div>
         """
 
-        # 역삼각형 모양 CSS 적용
-        triangle_html = f"""
+        # 원형 순위 배지
+        badge_html = f"""
         <div style="
-            position: relative;
-            width: 34px;
+            width: 38px;
             height: 38px;
-            filter: drop-shadow(2px 3px 3px rgba(0,0,0,0.4));">
-            <div style="
-                width: 34px;
-                height: 34px;
-                background-color: #1565C0;
-                clip-path: polygon(0% 0%, 100% 0%, 50% 100%);
-                display: flex;
-                align-items: flex-start;
-                justify-content: center;
-                border-top: 2px solid white;">
-                <span style="
-                    color: white;
-                    font-weight: bold;
-                    font-size: 13px;
-                    margin-top: 3px;">
-                    {rank}
-                </span>
-            </div>
+            border-radius: 50%;
+            background-color: #1565C0;
+            border: 3px solid #FFFFFF;
+            box-shadow: 0 2px 7px rgba(0, 0, 0, 0.45);
+            color: #FFFFFF;
+            font-size: 15px;
+            font-weight: bold;
+            font-family: Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+            cursor: pointer;
+        ">
+            {rank}
         </div>
         """
 
         folium.Marker(
             location=[lat, lon],
-            popup=folium.Popup(popup_text, max_width=250),
+            popup=folium.Popup(
+                popup_html,
+                max_width=280,
+            ),
+            tooltip=folium.Tooltip(
+                f"사고다발지점 {rank}위 · {count}건",
+                sticky=True,
+            ),
             icon=folium.DivIcon(
-                html=triangle_html,
-                icon_size=(34, 38),
-                icon_anchor=(17, 38),  # 역삼각형 하단 뾰족한 끝점이 좌표 위치에 맞춰짐
+                html=badge_html,
+                icon_size=(38, 38),
+
+                # 원의 정중앙을 실제 좌표에 맞춤
+                icon_anchor=(19, 19),
             ),
         ).add_to(hotspot_layer)
 
@@ -446,30 +486,62 @@ if not top10_df.empty:
 
 # -----------------------------------
 # 사망사고 마커 표시
+# 붉은색 핀 형태 아이콘
 # -----------------------------------
 if "is_fatal" in filtered_df.columns:
-    fatal_df = filtered_df[filtered_df["is_fatal"] == 1].copy()
-    fatal_group = folium.FeatureGroup(name="사망사고", show=True)
+    fatal_df = filtered_df.loc[
+        filtered_df["is_fatal"] == 1,
+        [
+            "latitude",
+            "longitude",
+            "관할",
+            "acdnt_year",
+            "acdnt_month",
+            "acdnt_day",
+            "occrrnc_time_dc",
+            "acdnt_hdc",
+            "fatal_type",
+            "dprs_cnt",
+        ],
+    ]
 
-    for _, row in fatal_df.iterrows():
-        if pd.isna(row["latitude"]) or pd.isna(row["longitude"]):
-            continue
+    fatal_group = folium.FeatureGroup(
+        name="사망사고",
+        show=True,
+    )
 
+    for row in fatal_df.itertuples(index=False):
         popup_html = f"""
-        <b>🚨 사망사고</b><br>
-        <b>관할</b> : {row.get('관할', '')}<br>
-        <b>발생연도</b> : {row.get('acdnt_year', '')}년<br> 
-        <b>발생일</b> : {row.get('acdnt_month', '')} {row.get('acdnt_day', '')}<br>
-        <b>발생시간</b> : {row.get('occrrnc_time_dc', '')}<br>
-        <b>사고종별</b> : {row.get('acdnt_hdc', '')}<br>
-        <b>사망자</b> : {row.get('fatal_type', '')} {row.get('dprs_cnt', 0)}명
+        <div style="width:220px; font-size:13px; line-height:1.7;">
+            <div style="
+                color:#B71C1C;
+                font-size:15px;
+                font-weight:bold;
+                margin-bottom:5px;
+            ">
+                사망사고
+            </div>
+            <b>관할</b> : {row.관할}<br>
+            <b>발생연도</b> : {row.acdnt_year}년<br>
+            <b>발생일</b> : {row.acdnt_month} {row.acdnt_day}<br>
+            <b>발생시간</b> : {row.occrrnc_time_dc}<br>
+            <b>사고종별</b> : {row.acdnt_hdc}<br>
+            <b>사망자</b> :
+            <span style="color:#B71C1C; font-weight:bold;">
+                {row.fatal_type} {row.dprs_cnt}명
+            </span>
+        </div>
         """
 
         folium.Marker(
-            location=[row["latitude"], row["longitude"]],
-            popup=folium.Popup(popup_html, max_width=350),
-            tooltip="사망사고",
-            icon=folium.Icon(color="red", icon="info-sign"),
+            location=[row.latitude, row.longitude],
+            popup=folium.Popup(popup_html, max_width=300),
+            tooltip="사망사고 상세정보",
+            icon=folium.Icon(
+                color="red",
+                icon="map-marker",
+                prefix="fa",
+            ),
         ).add_to(fatal_group)
 
     fatal_group.add_to(m2)
@@ -629,12 +701,12 @@ if not filtered_df.empty:
         )
         violt_counts.columns = ["법규위반유형", "사고건수"]
 
-        violt_counts["sort_key"] = violt_counts["법규위반유형"].apply(
-            lambda x: (x == "기타", x)
-        )
-        violt_counts = violt_counts.sort_values(by="sort_key").drop(
-            columns=["sort_key"]
-        )
+        # '기타' 항목 정렬용 보조 컬럼 생성 (Categorical 타입 MultiIndex 오류 방지)
+        violt_counts["is_etc"] = (violt_counts["법규위반유형"].astype(str) == "기타")
+        violt_counts = violt_counts.sort_values(
+            by=["is_etc", "사고건수"], 
+            ascending=[True, False]
+        ).drop(columns=["is_etc"])
 
         fig_violt = px.bar(violt_counts, x="법규위반유형", y="사고건수")
         fig_violt.update_yaxes(title_text="")
@@ -643,7 +715,7 @@ if not filtered_df.empty:
             margin=dict(l=20, r=20, t=15, b=15), height=260
         )
         st.plotly_chart(fig_violt, use_container_width=True)
+
+        
 else:
-    st.info(
-        "선택된 필터 조건에 부합하는 데이터가 존재하지 않아 그래프를 표시할 수 없습니다."
-    )
+    st.info("선택된 필터 조건에 부합하는 데이터가 존재하지 않아 그래프를 표시할 수 없습니다.")

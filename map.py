@@ -29,7 +29,7 @@ df['time_num'] = df['occrrnc_time_dc'].str.replace('시', '').astype(int)
 # -----------------------------------
 @st.cache_data
 def load_gis_data():
-    file_path = "대전관할지도/PSS_Daejeon.shp"
+    file_path = "pss/PSS_Daejeon.shp"
     gdf = gpd.read_file(file_path)
     gdf = gdf[gdf.geometry.notnull() & gdf.is_valid]
     

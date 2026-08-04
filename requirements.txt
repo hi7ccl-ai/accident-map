@@ -1,7 +1,9 @@
 streamlit
 pandas
+numpy
 geopandas
 folium
 streamlit-folium
 plotly
-mapclassify
+scikit-learn
+pyarrow

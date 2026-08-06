@@ -1,4 +1,9 @@
 import geopandas as gpd
+import hashlib
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 import numpy as np
 import pandas as pd
 import folium
@@ -8,11 +13,128 @@ from sklearn.neighbors import BallTree
 import streamlit as st
 from streamlit_folium import st_folium
 
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
 # -----------------------------------
 # 0. 스트림릿 페이지 및 데이터 로드
 # -----------------------------------
 st.set_page_config(page_title="대전 교통사고 분석지도", layout="wide")
 st.title("🚨 대전청 교통사고 분석지도")
+
+# ============================================================
+# 공통 UI 디자인
+# - 사이드바 배경·그룹 카드·버튼
+# - KPI 아래 현재 검색조건 박스
+# ============================================================
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #F8FAFC 0%, #F1F5F9 100%);
+        border-right: 1px solid #E2E8F0;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        padding-top: 1.2rem;
+    }
+
+    [data-testid="stSidebar"] h2 {
+        color: #1D4ED8;
+        letter-spacing: -0.02em;
+    }
+
+    [data-testid="stSidebar"] details {
+        border: 1px solid #E2E8F0;
+        border-radius: 12px;
+        background-color: #FFFFFF;
+        padding: 2px 8px;
+        margin: 8px 0;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+
+    [data-testid="stSidebar"] details summary {
+        font-weight: 700;
+        color: #334155;
+    }
+
+    [data-testid="stSidebar"] .stButton > button {
+        border-radius: 10px;
+        border: 1px solid #CBD5E1;
+        background-color: #FFFFFF;
+        color: #334155;
+        font-weight: 700;
+    }
+
+    [data-testid="stSidebar"] .stButton > button:hover {
+        border-color: #2563EB;
+        color: #1D4ED8;
+        background-color: #EFF6FF;
+    }
+
+    .search-condition-box {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin-top: 6px;
+        margin-bottom: 18px;
+        padding: 11px 15px;
+        border: 1px solid #DBEAFE;
+        border-left: 4px solid #2563EB;
+        border-radius: 10px;
+        background-color: #F8FAFC;
+        color: #334155;
+        font-size: 13px;
+        line-height: 1.6;
+    }
+
+    .search-condition-title {
+        color: #1D4ED8;
+        font-weight: 700;
+        margin-right: 5px;
+    }
+
+    .search-condition-item {
+        white-space: nowrap;
+    }
+
+    .search-condition-divider {
+        color: #CBD5E1;
+        margin: 0 2px;
+    }
+
+    /* 사이드바 접기 그룹 카드 */
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        border: 1px solid #D7E0EA !important;
+        border-radius: 12px !important;
+        background-color: #FFFFFF !important;
+        margin: 9px 0 !important;
+        overflow: hidden !important;
+        box-shadow: 0 2px 5px rgba(15, 23, 42, 0.05) !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stExpander"] details {
+        border: 0 !important;
+        background: transparent !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        padding: 0.35rem 0.25rem !important;
+        font-weight: 700 !important;
+        color: #334155 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary:hover {
+        color: #1D4ED8 !important;
+        background-color: #F8FAFC !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # 사고 데이터 불러오기 (Parquet 파일 로드 & 캐싱)
@@ -49,6 +171,111 @@ def load_data():
 
 
 df = load_data()
+
+
+# -----------------------------------
+# 0-1. 좌표를 상세주소로 변환
+# Kakao Local API 사용
+# - .streamlit/secrets.toml의 KAKAO_REST_API_KEY 자동 사용
+# - 도로명주소와 지번주소를 함께 반환
+# - 키가 없거나 호출에 실패하면 기존 법정동명으로 대체
+# -----------------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_address_info(latitude, longitude, fallback=""):
+    """WGS84 위도·경도를 도로명주소와 지번주소로 변환"""
+
+    default_address = str(fallback).strip() if fallback else "주소 확인 불가"
+
+    try:
+        kakao_key = st.secrets.get("KAKAO_REST_API_KEY", "")
+    except Exception:
+        kakao_key = ""
+
+    if not kakao_key:
+        return {
+            "road_address": "확인 불가",
+            "jibun_address": default_address,
+            "display_address": default_address,
+        }
+
+    try:
+        query = urllib.parse.urlencode(
+            {
+                "x": float(longitude),
+                "y": float(latitude),
+                "input_coord": "WGS84",
+            }
+        )
+
+        request = urllib.request.Request(
+            (
+                "https://dapi.kakao.com/v2/local/geo/"
+                f"coord2address.json?{query}"
+            ),
+            headers={
+                "Authorization": f"KakaoAK {kakao_key}",
+            },
+        )
+
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        documents = result.get("documents", [])
+        if not documents:
+            return {
+                "road_address": "확인 불가",
+                "jibun_address": default_address,
+                "display_address": default_address,
+            }
+
+        document = documents[0]
+
+        address_data = document.get("address") or {}
+        jibun_address = (
+            address_data.get("address_name", "")
+            or default_address
+        )
+
+        road_address_data = document.get("road_address") or {}
+        road_address = (
+            road_address_data.get("address_name", "")
+            or "확인 불가"
+        )
+
+        display_address = (
+            road_address
+            if road_address != "확인 불가"
+            else jibun_address
+        )
+
+        return {
+            "road_address": road_address,
+            "jibun_address": jibun_address,
+            "display_address": display_address,
+        }
+
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        TimeoutError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return {
+            "road_address": "확인 불가",
+            "jibun_address": default_address,
+            "display_address": default_address,
+        }
+
+
+def get_jibun_address(latitude, longitude, fallback=""):
+    """기존 AI 분석 코드와의 호환성을 위해 지번주소만 반환"""
+
+    return get_address_info(
+        latitude=latitude,
+        longitude=longitude,
+        fallback=fallback,
+    )["jibun_address"]
 
 
 # -----------------------------------
@@ -149,6 +376,458 @@ def get_top_hotspots(target_df, radius_m, top_n):
     return pd.DataFrame(selected_rows)
 
 
+
+# ============================================================
+# 0-2. 생성형 AI 분석 보고서용 함수
+# - 현재 필터링 결과를 JSON 구조로 집계
+# - 원본 사고 행·접수번호·좌표는 외부 API로 전송하지 않음
+# ============================================================
+
+def _clean_series(dataframe, column_name):
+    """결측값과 문자열 nan을 제거한 문자열 Series 반환"""
+    if column_name not in dataframe.columns:
+        return pd.Series(dtype="object")
+
+    series = (
+        dataframe[column_name]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+
+    return series[
+        (series != "")
+        & (series.str.lower() != "nan")
+        & (series.str.lower() != "none")
+    ]
+
+
+def _distribution_dict(dataframe, column_name, top_n=None):
+    """항목별 건수와 유효값 기준 비율을 JSON용 dict로 변환"""
+    series = _clean_series(dataframe, column_name)
+
+    if series.empty:
+        return {}
+
+    counts = series.value_counts()
+    if top_n is not None:
+        counts = counts.head(top_n)
+
+    valid_total = int(series.shape[0])
+
+    return {
+        str(label): {
+            "count": int(count),
+            "ratio_percent": round(count / valid_total * 100, 1),
+        }
+        for label, count in counts.items()
+    }
+
+
+def _cross_table_dict(
+    dataframe,
+    row_column,
+    column_column,
+    max_rows=8,
+    max_columns=8,
+):
+    """상위 항목 중심의 교차표를 JSON용 중첩 dict로 변환"""
+    if (
+        row_column not in dataframe.columns
+        or column_column not in dataframe.columns
+    ):
+        return {}
+
+    temp = dataframe[[row_column, column_column]].copy()
+    temp[row_column] = temp[row_column].astype(str).str.strip()
+    temp[column_column] = temp[column_column].astype(str).str.strip()
+
+    temp = temp[
+        temp[row_column].notna()
+        & temp[column_column].notna()
+        & temp[row_column].str.lower().ne("nan")
+        & temp[column_column].str.lower().ne("nan")
+        & temp[row_column].ne("")
+        & temp[column_column].ne("")
+    ]
+
+    if temp.empty:
+        return {}
+
+    top_rows = (
+        temp[row_column]
+        .value_counts()
+        .head(max_rows)
+        .index
+    )
+    top_columns = (
+        temp[column_column]
+        .value_counts()
+        .head(max_columns)
+        .index
+    )
+
+    temp = temp[
+        temp[row_column].isin(top_rows)
+        & temp[column_column].isin(top_columns)
+    ]
+
+    table = pd.crosstab(
+        temp[row_column],
+        temp[column_column],
+    )
+
+    result = {}
+    for row_label, row_values in table.iterrows():
+        result[str(row_label)] = {
+            str(column_label): int(value)
+            for column_label, value in row_values.items()
+            if int(value) > 0
+        }
+
+    return result
+
+
+def _year_distribution(dataframe):
+    """연도별 사고 건수 반환"""
+    if "acdnt_year" not in dataframe.columns:
+        return {}
+
+    counts = (
+        dataframe["acdnt_year"]
+        .dropna()
+        .astype(int)
+        .value_counts()
+        .sort_index()
+    )
+
+    return {
+        str(year): int(count)
+        for year, count in counts.items()
+    }
+
+
+def _hour_distribution(dataframe):
+    """시간별 사고 건수와 비율 반환"""
+    if "time_num" not in dataframe.columns:
+        return {}
+
+    series = pd.to_numeric(
+        dataframe["time_num"],
+        errors="coerce",
+    ).dropna()
+
+    if series.empty:
+        return {}
+
+    counts = series.astype(int).value_counts().sort_index()
+    total = int(counts.sum())
+
+    return {
+        f"{int(hour):02d}시": {
+            "count": int(count),
+            "ratio_percent": round(count / total * 100, 1),
+        }
+        for hour, count in counts.items()
+    }
+
+
+def _hotspot_summary(top_hotspot_dataframe):
+    """사고다발지점의 비식별 집계정보만 반환"""
+    if top_hotspot_dataframe is None or top_hotspot_dataframe.empty:
+        return []
+
+    result = []
+    for rank, (_, row) in enumerate(
+        top_hotspot_dataframe.iterrows(),
+        start=1,
+    ):
+        location_name = row.get("legaldong_name", "")
+        if pd.isna(location_name):
+            location_name = ""
+
+        jibun_address = get_jibun_address(
+            latitude=row["latitude"],
+            longitude=row["longitude"],
+            fallback=str(location_name),
+        )
+
+        result.append(
+            {
+                "rank": rank,
+                "jibun_address": str(jibun_address),
+                "nearby_accident_count": int(row["nearby_count"]),
+            }
+        )
+
+    return result
+
+
+def make_ai_analysis_package(
+    target_df,
+    top_hotspot_dataframe,
+    selected_filter_info,
+    hotspot_radius_m,
+):
+    """
+    현재 지도 필터 결과를 GPT에 전달할 JSON 분석 패키지로 생성.
+    수치 계산은 Pandas가 수행하고 GPT는 해석과 문서작성만 수행.
+    """
+    total_accidents = int(len(target_df))
+
+    if "dprs_cnt" in target_df.columns:
+        total_deaths = int(
+            pd.to_numeric(
+                target_df["dprs_cnt"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .sum()
+        )
+    else:
+        total_deaths = 0
+
+    if "is_fatal" in target_df.columns:
+        fatal_accidents = int(
+            pd.to_numeric(
+                target_df["is_fatal"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .eq(1)
+            .sum()
+        )
+    elif "acdnt_gae_dc" in target_df.columns:
+        fatal_accidents = int(
+            target_df["acdnt_gae_dc"]
+            .astype(str)
+            .eq("사망사고")
+            .sum()
+        )
+    else:
+        fatal_accidents = 0
+
+    package = {
+        "metadata": {
+            "purpose": "대전경찰청 교통사고 관리자용 AI 분석 보고서",
+            "data_scope": "현재 지도에 필터링되어 현출된 사고의 집계결과",
+            "privacy_note": (
+                "원본 사고행, 접수번호, 개인식별정보, 상세주소, "
+                "위도·경도는 포함하지 않음"
+            ),
+            "interpretation_rule": (
+                "건수·비율 계산은 Python이 수행했으며, "
+                "생성형 AI는 제공된 집계값의 해석과 문서작성만 수행"
+            ),
+        },
+        "selected_filters": selected_filter_info,
+        "overview": {
+            "total_accidents": total_accidents,
+            "fatal_accidents": fatal_accidents,
+            "total_deaths": total_deaths,
+        },
+        "distributions": {
+            "by_year": _year_distribution(target_df),
+            "by_hour": _hour_distribution(target_df),
+            "by_accident_severity": _distribution_dict(
+                target_df,
+                "acdnt_gae_dc",
+            ),
+            "by_accident_type": _distribution_dict(
+                target_df,
+                "acdnt_hdc",
+            ),
+            "by_police_station": _distribution_dict(
+                target_df,
+                "관할",
+            ),
+            "by_weather": _distribution_dict(
+                target_df,
+                "wether_sttus_dc",
+            ),
+            "by_violation": _distribution_dict(
+                target_df,
+                "lrg_violt_1_dc",
+                top_n=12,
+            ),
+            "by_offending_vehicle": _distribution_dict(
+                target_df,
+                "wrngdo_vhcle_asort_dc",
+                top_n=12,
+            ),
+            "by_damaged_vehicle": _distribution_dict(
+                target_df,
+                "dmge_vhcle_asort_dc",
+                top_n=12,
+            ),
+            "by_fatal_type": _distribution_dict(
+                target_df,
+                "fatal_type",
+                top_n=12,
+            ),
+            "by_fatal_age_group": _distribution_dict(
+                target_df,
+                "fatal_age_group",
+                top_n=12,
+            ),
+        },
+        "cross_analyses": {
+            "hour_x_accident_type": _cross_table_dict(
+                target_df,
+                "time_num",
+                "acdnt_hdc",
+                max_rows=24,
+                max_columns=5,
+            ),
+            "hour_x_fatal_type": _cross_table_dict(
+                target_df,
+                "time_num",
+                "fatal_type",
+                max_rows=24,
+                max_columns=10,
+            ),
+            "offending_vehicle_x_damaged_vehicle": _cross_table_dict(
+                target_df,
+                "wrngdo_vhcle_asort_dc",
+                "dmge_vhcle_asort_dc",
+                max_rows=10,
+                max_columns=10,
+            ),
+            "violation_x_accident_severity": _cross_table_dict(
+                target_df,
+                "lrg_violt_1_dc",
+                "acdnt_gae_dc",
+                max_rows=12,
+                max_columns=6,
+            ),
+            "police_station_x_accident_type": _cross_table_dict(
+                target_df,
+                "관할",
+                "acdnt_hdc",
+                max_rows=10,
+                max_columns=5,
+            ),
+        },
+        "hotspots": {
+            "analysis_radius_m": int(hotspot_radius_m),
+            "ranked_locations": _hotspot_summary(
+                top_hotspot_dataframe
+            ),
+        },
+        "analysis_limitations": [
+            "이 자료는 선택된 필터 조건의 기술통계이며 인과관계를 직접 증명하지 않음",
+            "교통량·도로구조·신호체계·현장시야 등 외부요인은 포함되지 않을 수 있음",
+            "대책 시행 전 해당 지점의 현장점검과 관계기관 협의가 필요함",
+        ],
+    }
+
+    return package
+
+
+def build_ai_report_prompt(analysis_json):
+    """실무자가 변경할 수 없는 고정형 관리자 보고 프롬프트"""
+    return f"""
+당신은 대한민국 경찰의 교통안전 분석 업무를 지원하는 보고서 작성 보조자다.
+아래 JSON은 현재 지도에 현출된 교통사고를 Python으로 정확히 집계한 결과다.
+
+[절대 준수사항]
+1. JSON에 제공된 사실과 수치만 사용하라.
+2. 존재하지 않는 수치, 지점 특성, 사고원인, 정책 효과를 추정하거나 생성하지 마라.
+3. 통계적 집중 또는 연관성을 인과관계로 단정하지 마라.
+4. 개별 사고의 책임이나 법률적 판단을 하지 마라.
+5. 자료만으로 확인할 수 없는 사항은 '추가 현장점검 필요'라고 명시하라.
+6. 각 핵심 판단에는 가능한 한 근거가 되는 건수 또는 비율을 함께 제시하라.
+7. 사고 건수가 지나치게 적어 일반화가 어려우면 그 한계를 먼저 경고하라.
+8. 문체는 간결한 대한민국 공공기관 관리자 보고서 문체로 작성하라.
+
+[보고서 형식]
+# AI 교통사고 분석 보고서
+
+## 1. 분석 개요
+- 선택 조건과 분석 대상
+- 전체 사고건수, 사망사고건수, 사망자수
+
+## 2. 핵심 분석
+- 가장 중요한 특징 3~5개
+- 단순 순위 나열보다 시간대·사고종별·차종·법규위반·관할 간 교차특성을 우선 분석
+- 전체 사고와 중대사고 특성이 다르면 구분하여 설명
+
+## 3. 사고다발지점 검토
+- 제공된 사고다발지점 집계가 있을 때만 작성
+- 정확한 원인을 단정하지 말고 현장점검이 필요한 항목을 제시
+
+## 4. 교통안전 대책
+- 단속
+- 시설개선
+- 교육·홍보
+- 관계기관 협업
+각 분야에서 데이터와 직접 연결되는 실행 가능한 사항만 제안하라.
+
+## 5. 종합의견
+- 관리자가 우선 검토할 핵심과제 2~3개를 명확히 정리하라.
+
+## 6. 분석 한계
+- JSON의 analysis_limitations를 반영하라.
+
+[분석용 JSON]
+{analysis_json}
+""".strip()
+
+
+def generate_ai_report(analysis_package):
+    """OpenAI Responses API로 상세 분석 보고서 생성"""
+    if OpenAI is None:
+        raise RuntimeError(
+            "openai 라이브러리가 설치되지 않았습니다. "
+            "터미널에서 'pip install openai'를 실행하세요."
+        )
+
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    except KeyError as exc:
+        raise RuntimeError(
+            ".streamlit/secrets.toml 파일에 "
+            "OPENAI_API_KEY를 등록하세요."
+        ) from exc
+
+    client = OpenAI(api_key=api_key)
+
+    analysis_json = json.dumps(
+        analysis_package,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    prompt = build_ai_report_prompt(analysis_json)
+
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=prompt,
+        max_output_tokens=1800,
+    )
+
+    return response.output_text, analysis_json
+
+
+def make_filter_signature(selected_filter_info, target_df):
+    """필터 변경 여부를 확인하기 위한 짧은 식별값"""
+    signature_source = {
+        "filters": selected_filter_info,
+        "row_count": int(len(target_df)),
+    }
+
+    signature_text = json.dumps(
+        signature_source,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+    return hashlib.sha256(
+        signature_text.encode("utf-8")
+    ).hexdigest()
+
+
 # -----------------------------------
 # 1. SHP 파일 및 데이터 읽기 (캐싱 처리)
 # -----------------------------------
@@ -213,33 +892,63 @@ station_options = ["전체"] + [
 ]
 
 selected_ps = st.sidebar.selectbox(
-    "관할 경찰서 선택",
+    "관할 경찰서",
     station_options,
 )
 
 # -----------------------------------
-# [순서 2] 발생 연도 선택
+# [순서 2] 발생 연월 선택
+# accident_date 컬럼 활용
+# 예) 2023년 3월 ~ 2024년 5월
 # -----------------------------------
-min_year = (
-    int(df["acdnt_year"].min())
-    if "acdnt_year" in df.columns
-    else 2021
+
+# Parquet에서 날짜형으로 정상 로드되도록 자료형 확인
+df["accident_date"] = pd.to_datetime(
+    df["accident_date"],
+    errors="coerce",
 )
 
-max_year = (
-    int(df["acdnt_year"].max())
-    if "acdnt_year" in df.columns
-    else 2025
+# 실제 데이터에 존재하는 연월 목록 생성
+year_month_options = (
+    df["accident_date"]
+    .dropna()
+    .dt.to_period("M")
+    .drop_duplicates()
+    .sort_values()
+    .tolist()
 )
 
-start_year, end_year = st.sidebar.slider(
-    "발생 연도 범위 선택",
-    min_value=min_year,
-    max_value=max_year,
-    value=(min_year, max_year),
-    step=1,
-    format="%d년",
-)
+if year_month_options:
+    start_year_month, end_year_month = (
+        st.sidebar.select_slider(
+            "발생연월 범위",
+            options=year_month_options,
+            value=(
+                year_month_options[0],
+                year_month_options[-1],
+            ),
+            format_func=lambda value: (
+                f"{value.year}년 {value.month}월"
+            ),
+        )
+    )
+
+    st.sidebar.caption(
+        f"선택 기간: "
+        f"{start_year_month.year}년 "
+        f"{start_year_month.month}월 ~ "
+        f"{end_year_month.year}년 "
+        f"{end_year_month.month}월"
+    )
+
+else:
+    start_year_month = None
+    end_year_month = None
+
+    st.sidebar.warning(
+        "선택 가능한 발생연월 데이터가 없습니다."
+    )
+
 
 # -----------------------------------
 # [순서 3] 사고분류 선택
@@ -345,210 +1054,301 @@ else:
         f"{start_time:02d}시 ~ 익일 {end_time:02d}시"
     )
 
+
 # -----------------------------------
-# [순서 6] 가해차량 차종 선택
-# 승용 → 승합 → 화물 → 이륜 → 원동기 →
-# ATV → 자전거 → PM
-# 보행자는 선택항목에서 제외
+# [순서 6] 발생요일 선택
+# 체크박스 복수선택
+# 미선택 시 전체 요일
 # -----------------------------------
-wrngdo_vehicle_order = [
-    "승용",
-    "승합",
-    "화물",
-    "이륜",
-    "원동기",
-    "ATV",
-    "자전거",
-    "PM",
+weekday_order = [
+    "월요일",
+    "화요일",
+    "수요일",
+    "목요일",
+    "금요일",
+    "토요일",
+    "일요일",
 ]
 
-if "wrngdo_vhcle_asort_dc" in df.columns:
-    wrngdo_vehicle_values = set(
-        df["wrngdo_vhcle_asort_dc"]
+weekday_short_name = {
+    "월요일": "월",
+    "화요일": "화",
+    "수요일": "수",
+    "목요일": "목",
+    "금요일": "금",
+    "토요일": "토",
+    "일요일": "일",
+}
+
+if "dfk_dc" in df.columns:
+    available_weekdays = set(
+        df["dfk_dc"]
         .dropna()
         .astype(str)
+        .str.strip()
         .unique()
     )
 
-    wrngdo_options = [
-        vehicle
-        for vehicle in wrngdo_vehicle_order
-        if vehicle in wrngdo_vehicle_values
+    weekday_options = [
+        weekday
+        for weekday in weekday_order
+        if weekday in available_weekdays
     ]
 
 else:
-    wrngdo_options = wrngdo_vehicle_order
+    weekday_options = []
 
-selected_wrngdo = st.sidebar.multiselect(
-    "가해차량 차종 (복수 선택)",
-    wrngdo_options,
-    placeholder="전체 (미선택 시)",
-)
+# 다른 사이드바 입력항목과 동일한 제목 형식
+st.sidebar.write("발생요일")
 
-# -----------------------------------
-# [순서 7] 피해차량 차종 선택
-# 보행자 → 승용 → 승합 → 화물 → 이륜 →
-# 원동기 → ATV → 자전거 → PM
-# -----------------------------------
-damage_vehicle_order = [
-    "보행자",
-    "승용",
-    "승합",
-    "화물",
-    "이륜",
-    "원동기",
-    "ATV",
-    "자전거",
-    "PM",
-]
+# 7개 체크박스를 한 줄로 배치
+weekday_cols = st.sidebar.columns(7)
 
-if "dmge_vhcle_asort_dc" in df.columns:
-    damage_vehicle_values = set(
-        df["dmge_vhcle_asort_dc"]
-        .dropna()
-        .astype(str)
-        .unique()
+selected_weekdays = []
+
+for index, weekday in enumerate(weekday_options):
+    with weekday_cols[index]:
+        is_selected = st.checkbox(
+            weekday_short_name[weekday],
+            value=False,
+            key=f"weekday_checkbox_{weekday}",
+        )
+
+    if is_selected:
+        selected_weekdays.append(weekday)
+
+if selected_weekdays:
+    selected_weekday_labels = [
+        weekday_short_name[weekday]
+        for weekday in selected_weekdays
+    ]
+
+    st.sidebar.caption(
+        "선택 요일: "
+        + "·".join(selected_weekday_labels)
     )
 
-    dmge_options = [
-        vehicle
-        for vehicle in damage_vehicle_order
-        if vehicle in damage_vehicle_values
+else:
+    st.sidebar.caption("선택 요일: 전체")
+
+# ----------------------------------
+st.sidebar.divider()
+
+with st.sidebar.expander("🚗 차량 조건", expanded=False):
+    # -----------------------------------
+    # [순서 6] 가해차량 차종 선택
+    # 승용 → 승합 → 화물 → 이륜 → 원동기 →
+    # ATV → 자전거 → PM
+    # 보행자는 선택항목에서 제외
+    # -----------------------------------
+    wrngdo_vehicle_order = [
+        "승용",
+        "승합",
+        "화물",
+        "이륜",
+        "원동기",
+        "ATV",
+        "자전거",
+        "PM",
     ]
 
-else:
-    dmge_options = damage_vehicle_order
+    if "wrngdo_vhcle_asort_dc" in df.columns:
+        wrngdo_vehicle_values = set(
+            df["wrngdo_vhcle_asort_dc"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
 
-selected_dmge = st.sidebar.multiselect(
-    "피해차량 차종 (복수 선택)",
-    dmge_options,
-    placeholder="전체 (미선택 시)",
-)
+        wrngdo_options = [
+            vehicle
+            for vehicle in wrngdo_vehicle_order
+            if vehicle in wrngdo_vehicle_values
+        ]
 
-# -----------------------------------
-# [순서 8] 사망자 유형 선택
-# 보행자 → 승용 → 승합 → 화물 → 이륜 →
-# 원동기 → ATV → 자전거 → PM → 기타불명
-# -----------------------------------
-fatal_type_order = [
-    "보행자",
-    "승용",
-    "승합",
-    "화물",
-    "이륜",
-    "원동기",
-    "ATV",
-    "자전거",
-    "PM",
-    "기타불명",
-]
+    else:
+        wrngdo_options = wrngdo_vehicle_order
 
-if "fatal_type" in df.columns:
-    fatal_type_values = set(
-        df["fatal_type"]
-        .dropna()
-        .astype(str)
-        .unique()
+    selected_wrngdo = st.multiselect(
+        "가해차량 차종 (복수 선택)",
+        wrngdo_options,
+        placeholder="전체 (미선택 시)",
     )
 
-    fatal_type_options = [
-        fatal_type
-        for fatal_type in fatal_type_order
-        if fatal_type in fatal_type_values
+    # -----------------------------------
+    # [순서 7] 피해차량 차종 선택
+    # 보행자 → 승용 → 승합 → 화물 → 이륜 →
+    # 원동기 → ATV → 자전거 → PM
+    # -----------------------------------
+    damage_vehicle_order = [
+        "보행자",
+        "승용",
+        "승합",
+        "화물",
+        "이륜",
+        "원동기",
+        "ATV",
+        "자전거",
+        "PM",
     ]
 
-else:
-    fatal_type_options = []
+    if "dmge_vhcle_asort_dc" in df.columns:
+        damage_vehicle_values = set(
+            df["dmge_vhcle_asort_dc"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
 
-selected_fatal_type = st.sidebar.multiselect(
-    "사망자 유형 (복수 선택)",
-    fatal_type_options,
-    placeholder="전체 (미선택 시)",
-)
+        dmge_options = [
+            vehicle
+            for vehicle in damage_vehicle_order
+            if vehicle in damage_vehicle_values
+        ]
 
-# -----------------------------------
-# [순서 9] 사망자 연령대 선택
-# 기존 정렬 방식 유지
-# -----------------------------------
-fatal_age_options = (
-    sorted(
-        df["fatal_age_group"]
+    else:
+        dmge_options = damage_vehicle_order
+
+    selected_dmge = st.multiselect(
+        "피해차량 차종 (복수 선택)",
+        dmge_options,
+        placeholder="전체 (미선택 시)",
+    )
+
+
+with st.sidebar.expander("🚨 사망사고 조건", expanded=False):
+    # -----------------------------------
+    # [순서 8] 사망자 유형 선택
+    # 보행자 → 승용 → 승합 → 화물 → 이륜 →
+    # 원동기 → ATV → 자전거 → PM → 기타불명
+    # -----------------------------------
+    fatal_type_order = [
+        "보행자",
+        "승용",
+        "승합",
+        "화물",
+        "이륜",
+        "원동기",
+        "ATV",
+        "자전거",
+        "PM",
+        "기타불명",
+    ]
+
+    if "fatal_type" in df.columns:
+        fatal_type_values = set(
+            df["fatal_type"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+
+        fatal_type_options = [
+            fatal_type
+            for fatal_type in fatal_type_order
+            if fatal_type in fatal_type_values
+        ]
+
+    else:
+        fatal_type_options = []
+
+    selected_fatal_type = st.multiselect(
+        "사망자 유형 (복수 선택)",
+        fatal_type_options,
+        placeholder="전체 (미선택 시)",
+    )
+
+    # -----------------------------------
+    # [순서 9] 사망자 연령대 선택
+    # 기존 정렬 방식 유지
+    # -----------------------------------
+    fatal_age_options = (
+        sorted(
+            df["fatal_age_group"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        if "fatal_age_group" in df.columns
+        else []
+    )
+
+    selected_fatal_age = st.multiselect(
+        "사망자 연령대 (복수 선택)",
+        fatal_age_options,
+        placeholder="전체 (미선택 시)",
+    )
+
+
+with st.sidebar.expander("🌦️ 환경·원인 조건", expanded=False):
+    # -----------------------------------
+    # [순서 10] 날씨 선택
+    # 맑음 → 흐림 → 안개 → 비 → 눈 → 기타
+    # -----------------------------------
+    weather_order = [
+        "맑음",
+        "흐림",
+        "안개",
+        "비",
+        "눈",
+        "기타",
+    ]
+
+    if "wether_sttus_dc" in df.columns:
+        weather_values = set(
+            df["wether_sttus_dc"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+
+        wether_options = [
+            weather
+            for weather in weather_order
+            if weather in weather_values
+        ]
+
+    else:
+        wether_options = []
+
+    selected_wether = st.multiselect(
+        "날씨 (복수 선택)",
+        wether_options,
+        placeholder="전체 (미선택 시)",
+    )
+
+    # -----------------------------------
+    # [순서 11] 법규위반유형 선택
+    # '기타'는 마지막에 배치
+    # -----------------------------------
+    raw_violt_options = (
+        df["lrg_violt_1_dc"]
         .dropna()
         .unique()
         .tolist()
-    )
-    if "fatal_age_group" in df.columns
-    else []
-)
-
-selected_fatal_age = st.sidebar.multiselect(
-    "사망자 연령대 (복수 선택)",
-    fatal_age_options,
-    placeholder="전체 (미선택 시)",
-)
-
-# -----------------------------------
-# [순서 10] 날씨 선택
-# 맑음 → 흐림 → 안개 → 비 → 눈 → 기타
-# -----------------------------------
-weather_order = [
-    "맑음",
-    "흐림",
-    "안개",
-    "비",
-    "눈",
-    "기타",
-]
-
-if "wether_sttus_dc" in df.columns:
-    weather_values = set(
-        df["wether_sttus_dc"]
-        .dropna()
-        .astype(str)
-        .unique()
+        if "lrg_violt_1_dc" in df.columns
+        else []
     )
 
-    wether_options = [
-        weather
-        for weather in weather_order
-        if weather in weather_values
-    ]
+    violt_options = sorted(
+        raw_violt_options,
+        key=lambda x: (
+            str(x) == "기타",
+            str(x),
+        ),
+    )
 
-else:
-    wether_options = []
+    selected_violt = st.multiselect(
+        "법규위반유형 (복수 선택)",
+        violt_options,
+        placeholder="전체 (미선택 시)",
+    )
 
-selected_wether = st.sidebar.multiselect(
-    "날씨 (복수 선택)",
-    wether_options,
-    placeholder="전체 (미선택 시)",
-)
 
-# -----------------------------------
-# [순서 11] 법규위반유형 선택
-# '기타'는 마지막에 배치
-# -----------------------------------
-raw_violt_options = (
-    df["lrg_violt_1_dc"]
-    .dropna()
-    .unique()
-    .tolist()
-    if "lrg_violt_1_dc" in df.columns
-    else []
-)
-
-violt_options = sorted(
-    raw_violt_options,
-    key=lambda x: (
-        str(x) == "기타",
-        str(x),
-    ),
-)
-
-selected_violt = st.sidebar.multiselect(
-    "법규위반유형 (복수 선택)",
-    violt_options,
-    placeholder="전체 (미선택 시)",
-)
+st.sidebar.divider()
+if st.sidebar.button("↺ 필터 초기화", use_container_width=True):
+    st.session_state.clear()
+    st.rerun()
 
 # -----------------------------------
 # 3. 데이터 동적 필터링 처리
@@ -597,11 +1397,24 @@ else:
     map_center = center
     zoom_level = 11
 
-# [필터 2] 발생 연도
-if "acdnt_year" in filtered_df.columns:
+# -----------------------------------
+# [필터 2] 발생 연월
+# 시작월 1일부터 종료월 마지막 날까지 포함
+# -----------------------------------
+if (
+    start_year_month is not None
+    and end_year_month is not None
+    and "accident_date" in filtered_df.columns
+):
+    start_date = start_year_month.start_time
+    end_date = end_year_month.end_time
+
     filtered_df = filtered_df[
-        (filtered_df["acdnt_year"] >= start_year)
-        & (filtered_df["acdnt_year"] <= end_year)
+        filtered_df["accident_date"].between(
+            start_date,
+            end_date,
+            inclusive="both",
+        )
     ]
 
 # [필터 3] 사고분류
@@ -633,6 +1446,24 @@ if "time_num" in filtered_df.columns:
             (filtered_df["time_num"] >= start_time)
             | (filtered_df["time_num"] <= end_time)
         ]
+
+# -----------------------------------
+# [필터 6] 발생요일
+# 하나 이상 선택한 경우에만 적용
+# 미선택 시 전체 요일 유지
+# -----------------------------------
+if selected_weekdays and "dfk_dc" in filtered_df.columns:
+    weekday_series = (
+        filtered_df["dfk_dc"]
+        .astype(str)
+        .str.strip()
+    )
+
+    filtered_df = filtered_df[
+        weekday_series.isin(selected_weekdays)
+    ]
+
+
 
 # [필터 6] 가해차량 차종
 if (
@@ -706,67 +1537,185 @@ filtered_df["longitude"] = pd.to_numeric(
 )
 heat_data = filtered_df[["latitude", "longitude"]].dropna().values.tolist()
 
-
-# -----------------------------------
-# 지도 위 사고다발지점 표시 설정
-# 입력값은 적용 버튼을 눌렀을 때만 지도에 반영
-# 기본값: 반경 100m / 상위 5개
-# -----------------------------------
-if "hotspot_radius" not in st.session_state:
-    st.session_state.hotspot_radius = 100
-
-if "hotspot_top_n" not in st.session_state:
-    st.session_state.hotspot_top_n = 5
-
-st.markdown("입력한 반경(m)에 따라, 지정한 수만큼 사고가 많은 지역이 현출됩니다.)")
-
-with st.form("hotspot_settings_form"):
-    hotspot_col1, hotspot_col2, hotspot_col3 = st.columns(
-        [1, 1, 0.7]
+# ============================================================
+# 상단 핵심지표(KPI)
+# ============================================================
+fatal_accident_count = 0
+if "is_fatal" in filtered_df.columns:
+    fatal_accident_count = int(
+        pd.to_numeric(
+            filtered_df["is_fatal"],
+            errors="coerce",
+        ).fillna(0).eq(1).sum()
+    )
+elif "acdnt_gae_dc" in filtered_df.columns:
+    fatal_accident_count = int(
+        filtered_df["acdnt_gae_dc"]
+        .astype(str)
+        .eq("사망사고")
+        .sum()
     )
 
-    with hotspot_col1:
-        radius_input = st.number_input(
-            "분석 반경 (m)",
-            min_value=50,
-            max_value=300,
-            value=int(st.session_state.hotspot_radius),
-            step=10,
-            format="%d",
-        )
+serious_accident_count = 0
+if "acdnt_gae_dc" in filtered_df.columns:
+    serious_accident_count = int(
+        filtered_df["acdnt_gae_dc"]
+        .astype(str)
+        .eq("중상사고")
+        .sum()
+    )
 
-    with hotspot_col2:
-        top_n_input = st.number_input(
-            "사고다발지역 수",
-            min_value=1,
-            max_value=10,
-            value=int(st.session_state.hotspot_top_n),
-            step=1,
-            format="%d",
-        )
+kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
 
-    with hotspot_col3:
-        # 입력창과 버튼의 세로 위치 맞춤
-        st.write("")
-        st.write("")
+with kpi_col1:
+    st.metric("선택된 관할", selected_ps)
 
-        hotspot_apply = st.form_submit_button(
-            "설정 적용",
-            use_container_width=True,
-        )
+with kpi_col2:
+    st.metric("총 사고", f"{len(filtered_df):,}건")
 
-# 적용 버튼을 눌렀을 때만 실제 설정값 변경
-if hotspot_apply:
-    st.session_state.hotspot_radius = int(radius_input)
-    st.session_state.hotspot_top_n = int(top_n_input)
+with kpi_col3:
+    st.metric("사망사고", f"{fatal_accident_count:,}건")
 
-hotspot_radius = st.session_state.hotspot_radius
-hotspot_top_n = st.session_state.hotspot_top_n
+with kpi_col4:
+    st.metric("중상사고", f"{serious_accident_count:,}건")
 
-st.caption(
-    f"현재 적용값: 반경 {hotspot_radius}m · "
-    f"사고다발지점 상위 {hotspot_top_n}개"
+# ============================================================
+# KPI 아래 현재 검색조건 요약
+# 발생연월 · 사고분류 · 사고종별 · 시간대 · 발생요일
+# ============================================================
+if start_year_month is not None and end_year_month is not None:
+    period_summary = (
+        f"{start_year_month.year}년 {start_year_month.month}월~"
+        f"{end_year_month.year}년 {end_year_month.month}월"
+    )
+else:
+    period_summary = "전체 기간"
+
+if selected_types:
+    severity_short_map = {
+        "사망사고": "사망",
+        "중상사고": "중상",
+        "경상사고": "경상",
+        "부상신고사고": "부상신고",
+    }
+    severity_summary = "·".join(
+        severity_short_map.get(value, value)
+        for value in selected_types
+    )
+else:
+    severity_summary = "전체 사고"
+
+accident_type_summary = (
+    selected_hdc
+    if selected_hdc != "전체"
+    else "전체 종별"
 )
+
+if start_time <= end_time:
+    time_summary = f"{start_time:02d}시~{end_time:02d}시"
+else:
+    time_summary = f"{start_time:02d}시~익일 {end_time:02d}시"
+
+if selected_weekdays:
+    weekday_summary = "·".join(
+        weekday_short_name.get(value, value)
+        for value in selected_weekdays
+    )
+else:
+    weekday_summary = "전체 요일"
+
+st.markdown(
+    f"""
+    <div class="search-condition-box">
+        <span class="search-condition-title">🔎 현재 검색조건</span>
+        <span class="search-condition-item">📅 {period_summary}</span>
+        <span class="search-condition-divider">|</span>
+        <span class="search-condition-item">사고분류: {severity_summary}</span>
+        <span class="search-condition-divider">|</span>
+        <span class="search-condition-item">사고종별: {accident_type_summary}</span>
+        <span class="search-condition-divider">|</span>
+        <span class="search-condition-item">⏰ {time_summary}</span>
+        <span class="search-condition-divider">|</span>
+        <span class="search-condition-item">요일: {weekday_summary}</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ============================================================
+# 페이지 탭
+# ============================================================
+map_tab, stats_tab = st.tabs(
+    [
+        "🗺️ 사고 지도",
+        "📊 통계 대시보드",
+    ]
+)
+
+with map_tab:
+    st.subheader("🗺️ 교통사고 공간분석", anchor=False)
+
+    # -----------------------------------
+    # 지도 위 사고다발지점 표시 설정
+    # 입력값은 적용 버튼을 눌렀을 때만 지도에 반영
+    # 기본값: 반경 100m / 상위 5개
+    # -----------------------------------
+    if "hotspot_radius" not in st.session_state:
+        st.session_state.hotspot_radius = 100
+
+    if "hotspot_top_n" not in st.session_state:
+        st.session_state.hotspot_top_n = 5
+
+    st.markdown("입력한 반경(m)에 따라, 지정한 수만큼 교통사고가 많은 상위지역이 현출됩니다.")
+
+    with st.form("hotspot_settings_form"):
+        hotspot_col1, hotspot_col2, hotspot_col3 = st.columns(
+            [1, 1, 0.7]
+        )
+
+        with hotspot_col1:
+            radius_input = st.number_input(
+                "분석 반경 (m)",
+                min_value=50,
+                max_value=300,
+                value=int(st.session_state.hotspot_radius),
+                step=10,
+                format="%d",
+            )
+
+        with hotspot_col2:
+            top_n_input = st.number_input(
+                "사고다발지역 수",
+                min_value=1,
+                max_value=10,
+                value=int(st.session_state.hotspot_top_n),
+                step=1,
+                format="%d",
+            )
+
+        with hotspot_col3:
+            # 입력창과 버튼의 세로 위치 맞춤
+            st.write("")
+            st.write("")
+
+            hotspot_apply = st.form_submit_button(
+                "설정 적용",
+                use_container_width=True,
+            )
+
+    # 적용 버튼을 눌렀을 때만 실제 설정값 변경
+    if hotspot_apply:
+        st.session_state.hotspot_radius = int(radius_input)
+        st.session_state.hotspot_top_n = int(top_n_input)
+
+    hotspot_radius = st.session_state.hotspot_radius
+    hotspot_top_n = st.session_state.hotspot_top_n
+
+    st.caption(
+        f"현재 적용값: 반경 {hotspot_radius}m · "
+        f"사고다발지점 상위 {hotspot_top_n}개"
+    )
+
 
 # -----------------------------------
 # 4. Folium 지도 시각화 생성
@@ -865,7 +1814,7 @@ if heat_data:
 # -----------------------------------
 # 사고다발지점 표시
 # 사용자 지정 반경 + 사용자 지정 표시 개수
-# 반경 내 가해차량 및 법규위반 상위 3개 표시
+# 반경 내 가해차량·피해차량·법규위반·사고상황 표시
 # -----------------------------------
 top_hotspot_df = get_top_hotspots(
     filtered_df,
@@ -878,11 +1827,112 @@ hotspot_layer = folium.FeatureGroup(
     show=True,
 )
 
+
+def make_top3_rank_html(
+    dataframe,
+    column_name,
+    total_count,
+    label_map=None,
+    separator="<br>",
+    show_count=True,
+):
+    """
+    지정 컬럼의 상위 3개 항목을 팝업용 HTML로 변환
+
+    show_count=True
+    → 1. 승용 63건 (75.0%)
+
+    show_count=False
+    → 월 (20.8%)
+    """
+
+    if column_name not in dataframe.columns:
+        return (
+            "<span style='color:#777777;'>"
+            "집계 가능한 데이터 없음"
+            "</span>"
+        )
+
+    series = (
+        dataframe[column_name]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+
+    series = series[
+        (series != "")
+        & (series.str.lower() != "nan")
+        & (series.str.lower() != "none")
+    ]
+
+    top3 = series.value_counts().head(3)
+
+    if top3.empty:
+        return (
+            "<span style='color:#777777;'>"
+            "집계 가능한 데이터 없음"
+            "</span>"
+        )
+
+    result = []
+
+    for order, (label, item_count) in enumerate(
+        top3.items(),
+        start=1,
+    ):
+        display_label = (
+            label_map.get(label, label)
+            if label_map
+            else label
+        )
+
+        ratio = (
+            item_count / total_count * 100
+            if total_count
+            else 0
+        )
+
+        # 가해차량·피해차량·법규위반
+        if show_count:
+            item_html = (
+                f"{order}. {display_label} "
+                f"<span style='color:#000000; "
+                f"font-weight:normal;'>"
+                f"{int(item_count)}건 ({ratio:.1f}%)"
+                f"</span>"
+            )
+
+        # 시간·요일
+        else:
+            item_html = (
+                f"{display_label} "
+                f"<span style='color:#000000; "
+                f"font-weight:normal;'>"
+                f"({ratio:.1f}%)"
+                f"</span>"
+            )
+
+        result.append(item_html)
+
+    return separator.join(result)
+
+
 if not top_hotspot_df.empty:
 
     # get_top_hotspots() 함수에서 사용한 데이터와
     # 동일한 행 순서를 유지하기 위해 인덱스 초기화
     hotspot_source_df = filtered_df.reset_index(drop=True)
+
+    weekday_short_map = {
+        "월요일": "월",
+        "화요일": "화",
+        "수요일": "수",
+        "목요일": "목",
+        "금요일": "금",
+        "토요일": "토",
+        "일요일": "일",
+    }
 
     for rank, (_, row) in enumerate(
         top_hotspot_df.iterrows(),
@@ -901,230 +1951,104 @@ if not top_hotspot_df.empty:
             location_name = ""
 
         # -----------------------------------
-        # 해당 사고다발지점 반경 내 사고 추출
+        # 중심좌표 상세주소 변환
+        # 지번주소 우선, 없으면 도로명주소 사용
         # -----------------------------------
-        nearby_indices = row["nearby_indices"]
+        address_info = get_address_info(
+            latitude=lat,
+            longitude=lon,
+            fallback=location_name,
+        )
 
+        road_address = str(
+            address_info.get("road_address", "")
+        ).strip()
+
+        jibun_address = str(
+            address_info.get("jibun_address", "")
+        ).strip()
+
+        # 지번주소가 정상적으로 있으면 우선 사용
+        if (
+            jibun_address
+            and jibun_address not in {
+                "확인 불가",
+                "주소 확인 불가",
+                "nan",
+                "None",
+            }
+        ):
+            center_address = jibun_address
+
+        # 지번주소가 없으면 도로명주소 사용
+        elif (
+            road_address
+            and road_address not in {
+                "확인 불가",
+                "주소 확인 불가",
+                "nan",
+                "None",
+            }
+        ):
+            center_address = road_address
+
+        # 둘 다 없으면 데이터의 법정동명 사용
+        else:
+            center_address = (
+                str(location_name).strip()
+                if str(location_name).strip()
+                else "주소 확인 불가"
+            )
+
+
+
+
+
+
+        # 해당 사고다발지점 반경 내 사고 추출
+        nearby_indices = row["nearby_indices"]
         nearby_accidents = hotspot_source_df.iloc[
             nearby_indices
         ]
 
-                # -----------------------------------
-        # 가해차량 상위 3개 집계
-        # -----------------------------------
-        vehicle_series = (
-            nearby_accidents["wrngdo_vhcle_asort_dc"]
-            .dropna()
-            .astype(str)
-            .str.strip()
+        # 가해차량·피해차량·법규위반 상위 3개
+        vehicle_html = make_top3_rank_html(
+            dataframe=nearby_accidents,
+            column_name="wrngdo_vhcle_asort_dc",
+            total_count=count,
         )
 
-        vehicle_series = vehicle_series[
-            (vehicle_series != "")
-            & (vehicle_series.str.lower() != "nan")
-        ]
-
-        top3_vehicles = vehicle_series.value_counts().head(3)
-
-        if not top3_vehicles.empty:
-            vehicle_html = "<br>".join(
-                f"{order}. {vehicle_type} "
-                f"<span style='color:#000000; font-weight:normal;'>"
-                f"{int(vehicle_count)}건 "
-                f"({vehicle_count / count * 100:.1f}%)"
-                f"</span>"
-                for order, (vehicle_type, vehicle_count)
-                in enumerate(top3_vehicles.items(), start=1)
-            )
-        else:
-            vehicle_html = (
-                "<span style='color:#777777;'>"
-                "집계 가능한 데이터 없음"
-                "</span>"
-            )
-
-        # -----------------------------------
-        # 피해차량 상위 3개 집계
-        # -----------------------------------
-        damage_vehicle_series = (
-            nearby_accidents["dmge_vhcle_asort_dc"]
-            .dropna()
-            .astype(str)
-            .str.strip()
+        damage_vehicle_html = make_top3_rank_html(
+            dataframe=nearby_accidents,
+            column_name="dmge_vhcle_asort_dc",
+            total_count=count,
         )
 
-        damage_vehicle_series = damage_vehicle_series[
-            (damage_vehicle_series != "")
-            & (damage_vehicle_series.str.lower() != "nan")
-        ]
-
-        top3_damage_vehicles = (
-            damage_vehicle_series
-            .value_counts()
-            .head(3)
+        violation_html = make_top3_rank_html(
+            dataframe=nearby_accidents,
+            column_name="lrg_violt_1_dc",
+            total_count=count,
+        )
+        # 사고상황: 시간·요일 상위 3개
+        # 필터 결과가 3개 미만이면 실제 존재하는 항목만 표시
+        time_html = make_top3_rank_html(
+            dataframe=nearby_accidents,
+            column_name="occrrnc_time_dc",
+            total_count=count,
+            separator=" &gt; ",
+            show_count=False,
         )
 
-        if not top3_damage_vehicles.empty:
-            damage_vehicle_html = "<br>".join(
-                f"{order}. {vehicle_type} "
-                f"<span style='color:#000000; font-weight:normal;'>"
-                f"{int(vehicle_count)}건 "
-                f"({vehicle_count / count * 100:.1f}%)"
-                f"</span>"
-                for order, (vehicle_type, vehicle_count)
-                in enumerate(top3_damage_vehicles.items(), start=1)
-            )
-        else:
-            damage_vehicle_html = (
-                "<span style='color:#777777;'>"
-                "집계 가능한 데이터 없음"
-                "</span>"
-            )
-
-        # -----------------------------------
-        # 법규위반 상위 3개 집계
-        # -----------------------------------
-        violation_series = (
-            nearby_accidents["lrg_violt_1_dc"]
-            .dropna()
-            .astype(str)
-            .str.strip()
+        weekday_html = make_top3_rank_html(
+            dataframe=nearby_accidents,
+            column_name="dfk_dc",
+            total_count=count,
+            label_map=weekday_short_map,
+            separator=" &gt; ",
+            show_count=False,
         )
 
-        violation_series = violation_series[
-            (violation_series != "")
-            & (violation_series.str.lower() != "nan")
-        ]
-
-        top3_violations = violation_series.value_counts().head(3)
-
-        if not top3_violations.empty:
-            violation_html = "<br>".join(
-                f"{order}. {violation_type} "
-                f"<span style='color:#000000; font-weight:normal;'>"
-                f"{int(violation_count)}건 "
-                f"({violation_count / count * 100:.1f}%)"
-                f"</span>"
-                for order, (violation_type, violation_count)
-                in enumerate(top3_violations.items(), start=1)
-            )
-        else:
-            violation_html = (
-                "<span style='color:#777777;'>"
-                "집계 가능한 데이터 없음"
-                "</span>"
-            )
-
-        # -----------------------------------
-        # 피해차량 상위 3개 집계
-        # dmge_vhcle_asort_dc 사용
-        # 항목별 건수와 전체 사고 대비 비율 표시
-        # -----------------------------------
-        if "dmge_vhcle_asort_dc" in nearby_accidents.columns:
-            damage_vehicle_series = (
-                nearby_accidents["dmge_vhcle_asort_dc"]
-                .dropna()
-                .astype(str)
-                .str.strip()
-            )
-
-            damage_vehicle_series = damage_vehicle_series[
-                (damage_vehicle_series != "")
-                & (damage_vehicle_series.str.lower() != "nan")
-            ]
-
-            top3_damage_vehicles = (
-                damage_vehicle_series
-                .value_counts()
-                .head(3)
-            )
-
-        else:
-            top3_damage_vehicles = pd.Series(dtype="int64")
-
-        if not top3_damage_vehicles.empty:
-            damage_vehicle_html = "<br>".join(
-                [
-                    (
-                        f"{order}. {vehicle_type} "
-                        f"<span style='color:#000000;'>"
-                        f"{int(vehicle_count)}건 "
-                        f"({vehicle_count / count * 100:.1f}%)"
-                        f"</span>"
-                    )
-                    for order, (
-                        vehicle_type,
-                        vehicle_count,
-                    ) in enumerate(
-                        top3_damage_vehicles.items(),
-                        start=1,
-                    )
-                ]
-            )
-
-        else:
-            damage_vehicle_html = (
-                "<span style='color:#777777;'>"
-                "집계 가능한 데이터 없음"
-                "</span>"
-            )
-
-        # -----------------------------------
-        # 법규위반 상위 3개 집계
-        # 항목별 건수와 전체 사고 대비 비율 표시
-        # -----------------------------------
-        if "lrg_violt_1_dc" in nearby_accidents.columns:
-            violation_series = (
-                nearby_accidents["lrg_violt_1_dc"]
-                .dropna()
-                .astype(str)
-                .str.strip()
-            )
-
-            violation_series = violation_series[
-                (violation_series != "")
-                & (violation_series.str.lower() != "nan")
-            ]
-
-            top3_violations = (
-                violation_series
-                .value_counts()
-                .head(3)
-            )
-
-        else:
-            top3_violations = pd.Series(dtype="int64")
-
-        if not top3_violations.empty:
-            violation_html = "<br>".join(
-                [
-                    (
-                        f"{order}. {violation_type} "
-                        f"<span style='color:#000000;'>"
-                        f"{int(violation_count)}건 "
-                        f"({violation_count / count * 100:.1f}%)"
-                        f"</span>"
-                    )
-                    for order, (
-                        violation_type,
-                        violation_count,
-                    ) in enumerate(
-                        top3_violations.items(),
-                        start=1,
-                    )
-                ]
-            )
-
-        else:
-            violation_html = (
-                "<span style='color:#777777;'>"
-                "집계 가능한 데이터 없음"
-                "</span>"
-            )
-        
-        # -----------------------------------
         # 사용자가 선택한 분석 반경 원 표시
-        # -----------------------------------
         folium.Circle(
             location=[lat, lon],
             radius=hotspot_radius,
@@ -1135,17 +2059,16 @@ if not top_hotspot_df.empty:
             fill_opacity=0.25,
             tooltip=folium.Tooltip(
                 f"<b>{rank}위 사고다발지점</b><br>"
+                f"{center_address}<br>"
                 f"반경 {hotspot_radius}m 내 사고 {count}건",
                 sticky=True,
             ),
         ).add_to(hotspot_layer)
 
-                # -----------------------------------
         # 사고다발지점 상세 팝업
-        # -----------------------------------
         popup_html = f"""
         <div style="
-            width:270px;
+            width:310px;
             font-size:13px;
             line-height:1.7;
             font-family:Arial, sans-serif;
@@ -1160,7 +2083,7 @@ if not top_hotspot_df.empty:
                 사고다발지점 TOP {rank}
             </div>
 
-            <b>위치</b> : {location_name}<br>
+            <b>중심주소</b> : {center_address}<br>
             <b>분석반경</b> : {hotspot_radius}m<br>
             <b>사고건수</b> : {count}건
 
@@ -1168,7 +2091,6 @@ if not top_hotspot_df.empty:
                 margin-top:8px;
                 padding-top:7px;
                 border-top:1px solid #DDDDDD;
-                color:#000000;
             ">
                 <b>가해차량</b><br>
                 {vehicle_html}
@@ -1178,7 +2100,6 @@ if not top_hotspot_df.empty:
                 margin-top:8px;
                 padding-top:7px;
                 border-top:1px solid #DDDDDD;
-                color:#000000;
             ">
                 <b>피해차량</b><br>
                 {damage_vehicle_html}
@@ -1188,17 +2109,25 @@ if not top_hotspot_df.empty:
                 margin-top:8px;
                 padding-top:7px;
                 border-top:1px solid #DDDDDD;
-                color:#000000;
             ">
                 <b>법규위반</b><br>
                 {violation_html}
             </div>
+
+            <div style="
+                margin-top:8px;
+                padding-top:7px;
+                border-top:1px solid #DDDDDD;
+            ">
+            <b>사고상황</b><br>
+            1. 요일 : {weekday_html}<br>
+            2. 시간 : {time_html}
+
+            </div>
         </div>
         """
 
-        # -----------------------------------
         # 파란색 원형 순위 배지
-        # -----------------------------------
         badge_html = f"""
         <div style="
             width:38px;
@@ -1225,10 +2154,13 @@ if not top_hotspot_df.empty:
             location=[lat, lon],
             popup=folium.Popup(
                 popup_html,
-                max_width=320,
+                max_width=360,
             ),
             tooltip=folium.Tooltip(
-                f"사고다발지점 {rank}위 · {count}건",
+                (
+                    f"사고다발지점 {rank}위 · "
+                    f"{center_address} · {count}건"
+                ),
                 sticky=True,
             ),
             icon=folium.DivIcon(
@@ -1361,891 +2293,1228 @@ folium.LayerControl(
 # -----------------------------------
 # 5. 메인 레이아웃: 지도 배치
 # -----------------------------------
-st_folium(m2, use_container_width=True, height=650, returned_objects=[])
 
 # ============================================================
-# 6. 하단 레이아웃: 분석 통계 배치
+# 5. 대시보드 상단 요약 및 페이지 탭
 # ============================================================
-
-st.markdown("---")
-st.subheader("📊 필터링된 사고 통계", anchor=False)
-
-
-# ============================================================
-# 6-1. 그래프 공통 디자인 설정
-# ============================================================
-
-# 일반 그래프용 색상
-COLOR_PRIMARY = "#2563EB"
-COLOR_SECONDARY = "#14B8A6"
-COLOR_PURPLE = "#7C3AED"
-COLOR_ORANGE = "#F97316"
-COLOR_FATAL = "#DC2626"
-COLOR_FATAL_LIGHT = "#F87171"
-COLOR_TEXT = "#1F2937"
-COLOR_GRID = "#E5E7EB"
-COLOR_MUTED = "#64748B"
-
-# 사고분류별 고정 색상
-ACCIDENT_CLASS_COLORS = {
-    "사망사고": "#DC2626",
-    "중상사고": "#F97316",
-    "경상사고": "#EAB308",
-    "부상신고사고": "#3B82F6",
-}
-
-# 사고종별 고정 색상
-ACCIDENT_TYPE_COLORS = {
-    "차대차": "#2563EB",
-    "차대사람": "#F97316",
-    "차량단독": "#7C3AED",
-}
-
-# 차종 그래프 팔레트
-VEHICLE_COLORS = [
-    "#2563EB",
-    "#14B8A6",
-    "#7C3AED",
-    "#F97316",
-    "#0891B2",
-    "#65A30D",
-    "#D97706",
-    "#DB2777",
-    "#64748B",
-]
-
-# 사망사고 그래프 팔레트
-FATAL_COLORS = [
-    "#991B1B",
-    "#B91C1C",
-    "#DC2626",
-    "#EF4444",
-    "#F87171",
-    "#FCA5A5",
-    "#FDBA74",
-    "#FB923C",
-    "#C2410C",
-]
-
-
-def apply_common_chart_style(
-    fig,
-    height=320,
-    show_legend=False,
-    horizontal=False,
-    top_margin=20,
-):
+st.markdown(
     """
-    Plotly 그래프 공통 스타일 적용
-    """
+    <style>
+    .block-container {
+        padding-top: 1.6rem;
+        padding-bottom: 2.5rem;
+    }
+    div[data-testid="stMetric"] {
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
+        border-radius: 14px;
+        padding: 14px 16px;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+    }
+    div[data-testid="stMetric"] label {
+        color: #64748B;
+        font-size: 0.88rem;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #0F172A;
+        font-weight: 700;
+    }
+    div[data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom: 1px solid #E2E8F0;
+    }
+    button[data-baseweb="tab"] {
+    div[data-testid="stExpander"] {
+        border: 1px solid #E2E8F0;
+        border-radius: 12px;
+        overflow: hidden;
+        margin-bottom: 0.75rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    fig.update_layout(
-        height=height,
-        margin=dict(
-            l=25,
-            r=35,
-            t=top_margin,
-            b=30,
+with map_tab:
+    st_folium(
+        m2,
+        use_container_width=True,
+        height=840,
+        returned_objects=[],
+    )
+
+    st.caption(
+        "레이어 선택창에서 사고다발지점·사망사고·히트맵·관할 경계를 "
+        "개별적으로 켜고 끌 수 있습니다."
+    )
+
+    st.markdown("---")
+
+    # ============================================================
+    # 5-1. 생성형 AI 교통사고 분석 보고서
+    # - 현재 지도에 현출된 filtered_df의 집계 결과만 JSON으로 전송
+    # - 버튼을 누를 때만 API 호출
+    # ============================================================
+
+    st.subheader("🤖 AI 교통사고 분석", anchor=False)
+
+    # 현재 선택된 필터를 보고서 JSON에 함께 기록
+    selected_filter_info = {
+        "police_station": selected_ps,
+        "year_month_range": [
+        (
+            f"{start_year_month.year}-{start_year_month.month:02d}"
+            if start_year_month is not None
+            else "전체"
         ),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(
-            family='"Malgun Gothic", "Apple SD Gothic Neo", sans-serif',
-            size=14,
-            color=COLOR_TEXT,
+        (
+            f"{end_year_month.year}-{end_year_month.month:02d}"
+            if end_year_month is not None
+            else "전체"
         ),
-        showlegend=show_legend,
-        hoverlabel=dict(
-            bgcolor="white",
-            bordercolor="#CBD5E1",
+    ],
+
+        "accident_severity": selected_types if selected_types else ["전체"],
+        "accident_type": selected_hdc,
+        "time_range": (
+            f"{start_time:02d}시~{end_time:02d}시"
+            if start_time <= end_time
+            else f"{start_time:02d}시~익일 {end_time:02d}시"
+        ),
+        "weekday": (
+            [
+                weekday_short_name[weekday]
+                for weekday in selected_weekdays
+            ]
+            if selected_weekdays
+            else ["전체"]
+        ),
+        "offending_vehicle": selected_wrngdo if selected_wrngdo else ["전체"],
+        "damaged_vehicle": selected_dmge if selected_dmge else ["전체"],
+        "fatal_type": (
+            selected_fatal_type
+            if selected_fatal_type
+            else ["전체"]
+        ),
+        "fatal_age_group": (
+            selected_fatal_age
+            if selected_fatal_age
+            else ["전체"]
+        ),
+        "weather": selected_wether if selected_wether else ["전체"],
+        "violation": selected_violt if selected_violt else ["전체"],
+    }
+
+    current_filter_signature = make_filter_signature(
+        selected_filter_info,
+        filtered_df,
+    )
+
+    # 필터가 바뀌었으면 이전 조건에서 만든 보고서임을 명확히 표시
+    report_is_current = (
+        st.session_state.get("ai_report_signature")
+        == current_filter_signature
+    )
+
+    generate_report_button = st.button(
+        "📄 현재 조건 AI 상세 분석 보고서 생성",
+        type="primary",
+        use_container_width=True,
+        disabled=filtered_df.empty,
+    )
+
+    # 현재 필터 조건의 분석용 JSON 패키지 생성
+    analysis_package_preview = None
+
+    if not filtered_df.empty:
+        analysis_package_preview = make_ai_analysis_package(
+            target_df=filtered_df,
+            top_hotspot_dataframe=top_hotspot_df,
+            selected_filter_info=selected_filter_info,
+            hotspot_radius_m=hotspot_radius,
+        )
+
+
+    if generate_report_button:
+        try:
+            with st.spinner(
+                "현재 조건의 사고 통계를 집계하고 AI 보고서를 작성하고 있습니다."
+            ):
+                ai_report, _ = generate_ai_report(
+                    analysis_package_preview
+                )
+
+            st.session_state["ai_report"] = ai_report
+            st.session_state["ai_report_signature"] = (
+                current_filter_signature
+            )
+            st.session_state["ai_report_filters"] = (
+                selected_filter_info
+            )
+            report_is_current = True
+
+        except Exception as error:
+            st.error("AI 분석 보고서 생성 중 오류가 발생했습니다.")
+            st.code(str(error))
+
+    if st.session_state.get("ai_report"):
+        if not report_is_current:
+            st.warning(
+                "아래 보고서는 현재와 다른 필터 조건에서 생성되었습니다. "
+                "현재 조건의 보고서가 필요하면 생성 버튼을 다시 누르세요."
+            )
+
+        with st.expander(
+            "📑 AI 상세 분석 보고서",
+            expanded=report_is_current,
+        ):
+            st.markdown(st.session_state["ai_report"])
+
+            st.caption(
+                "생성형 AI 결과는 의사결정 보조자료이며, "
+                "최종 활용 전 담당자의 통계·현장 확인이 필요합니다."
+            )
+
+with stats_tab:
+    # ============================================================
+    # 6. 하단 레이아웃: 분석 통계 배치
+    # ============================================================
+
+    # ============================================================
+    # 6-1. 그래프 공통 디자인 설정
+    # ============================================================
+
+    # 일반 그래프용 색상
+    COLOR_PRIMARY = "#2563EB"
+    COLOR_SECONDARY = "#14B8A6"
+    COLOR_PURPLE = "#7C3AED"
+    COLOR_ORANGE = "#F97316"
+    COLOR_FATAL = "#DC2626"
+    COLOR_FATAL_LIGHT = "#F87171"
+    COLOR_TEXT = "#1F2937"
+    COLOR_GRID = "#E5E7EB"
+    COLOR_MUTED = "#64748B"
+
+    # 사고분류별 고정 색상
+    ACCIDENT_CLASS_COLORS = {
+        "사망사고": "#DC2626",
+        "중상사고": "#F97316",
+        "경상사고": "#EAB308",
+        "부상신고사고": "#3B82F6",
+    }
+
+    # 사고종별 고정 색상
+    ACCIDENT_TYPE_COLORS = {
+        "차대차": "#2563EB",
+        "차대사람": "#F97316",
+        "차량단독": "#7C3AED",
+    }
+
+    # 차종 그래프 팔레트
+    VEHICLE_COLORS = [
+        "#2563EB",
+        "#14B8A6",
+        "#7C3AED",
+        "#F97316",
+        "#0891B2",
+        "#65A30D",
+        "#D97706",
+        "#DB2777",
+        "#64748B",
+    ]
+
+    # 사망사고 그래프 팔레트
+    FATAL_COLORS = [
+        "#991B1B",
+        "#B91C1C",
+        "#DC2626",
+        "#EF4444",
+        "#F87171",
+        "#FCA5A5",
+        "#FDBA74",
+        "#FB923C",
+        "#C2410C",
+    ]
+
+    CHART_COLOR_SCALES = {
+        # 차량 분석
+        "offending_vehicle": [
+            [0.0, "#DBEAFE"],
+            [0.5, "#60A5FA"],
+            [1.0, "#1D4ED8"],
+        ],
+        "damaged_vehicle": [
+            [0.0, "#CCFBF1"],
+            [0.5, "#2DD4BF"],
+            [1.0, "#0F766E"],
+        ],
+
+        # 사망사고 분석
+        "fatal_type": [
+            [0.0, "#FEE2E2"],
+            [0.5, "#F87171"],
+            [1.0, "#B91C1C"],
+        ],
+        "fatal_age": [
+            [0.0, "#F3E8FF"],
+            [0.5, "#C084FC"],
+            [1.0, "#7E22CE"],
+        ],
+
+        # 상황별 사고 분석
+        "weekday": [
+            [0.0, "#DCFCE7"],
+            [0.5, "#4ADE80"],
+            [1.0, "#15803D"],
+        ],
+        "time": [
+            [0.0, "#E0E7FF"],
+            [0.5, "#818CF8"],
+            [1.0, "#3730A3"],
+        ],
+        "violation": [
+            [0.0, "#FEF3C7"],   # 연한 Amber
+            [0.5, "#FBBF24"],   # Amber 400
+            [1.0, "#B45309"],   # Amber 700
+        ],
+    }
+
+    def apply_common_chart_style(
+        fig,
+        height=320,
+        show_legend=False,
+        horizontal=False,
+        top_margin=20,
+    ):
+        """
+        Plotly 그래프 공통 스타일 적용
+        """
+
+        fig.update_layout(
+            height=height,
+            margin=dict(
+                l=25,
+                r=35,
+                t=top_margin,
+                b=30,
+            ),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
             font=dict(
+                family='"Malgun Gothic", "Apple SD Gothic Neo", sans-serif',
                 size=14,
                 color=COLOR_TEXT,
-                family='"Malgun Gothic", sans-serif',
             ),
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=13),
-            title=None,
-        ),
-    )
+            showlegend=show_legend,
+            hoverlabel=dict(
+                bgcolor="white",
+                bordercolor="#CBD5E1",
+                font=dict(
+                    size=14,
+                    color=COLOR_TEXT,
+                    family='"Malgun Gothic", sans-serif',
+                ),
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(size=13),
+                title=None,
+            ),
+        )
 
-    fig.update_xaxes(
-        title_text="",
-        showline=True,
-        linewidth=1,
-        linecolor="#CBD5E1",
-        tickfont=dict(
-            size=13,
-            color=COLOR_TEXT,
-        ),
-        title_font=dict(size=14),
-        automargin=True,
-        zeroline=False,
-    )
-
-    fig.update_yaxes(
-        title_text="",
-        tickfont=dict(
-            size=13,
-            color=COLOR_TEXT,
-        ),
-        title_font=dict(size=14),
-        automargin=True,
-        zeroline=False,
-    )
-
-    if horizontal:
         fig.update_xaxes(
-            showgrid=True,
-            gridcolor=COLOR_GRID,
-            gridwidth=1,
-        )
-        fig.update_yaxes(showgrid=False)
-
-    else:
-        fig.update_xaxes(showgrid=False)
-        fig.update_yaxes(
-            showgrid=True,
-            gridcolor=COLOR_GRID,
-            gridwidth=1,
-        )
-
-    return fig
-
-
-def render_plotly_chart(fig):
-    """
-    Streamlit Plotly 출력 공통 설정
-    """
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={
-            "displayModeBar": False,
-            "responsive": True,
-        },
-    )
-
-
-# ============================================================
-# 6-2. 기본 정보 카드
-# ============================================================
-
-info_col1, info_col2 = st.columns(2)
-
-with info_col1:
-    st.metric(
-        label="선택된 관할",
-        value=selected_ps,
-    )
-
-with info_col2:
-    st.metric(
-        label="분석된 사고 건수",
-        value=f"{len(heat_data):,}건",
-    )
-
-st.markdown("##### 📈 세부 필터 항목별 사고 현황")
-
-
-# ============================================================
-# 6-3. 필터링 결과가 있는 경우
-# ============================================================
-
-if not filtered_df.empty:
-
-    # ========================================================
-    # 첫 번째 줄: 연도별 / 사고분류 / 사고종별
-    # ========================================================
-
-    row1_col1, row1_col2, row1_col3 = st.columns(3)
-
-    # --------------------------------------------------------
-    # 발생 연도별 추이
-    # --------------------------------------------------------
-    with row1_col1:
-        st.markdown("**📅 발생 연도별 추이**")
-
-        year_counts = (
-            filtered_df["acdnt_year"]
-            .value_counts()
-            .sort_index()
-            .rename_axis("연도")
-            .reset_index(name="사고건수")
-        )
-
-        fig_line = px.line(
-            year_counts,
-            x="연도",
-            y="사고건수",
-            markers=True,
-        )
-
-        fig_line.update_traces(
-            line=dict(
-                color=COLOR_PRIMARY,
-                width=3,
+            title_text="",
+            showline=True,
+            linewidth=1,
+            linecolor="#CBD5E1",
+            tickfont=dict(
+                size=13,
+                color=COLOR_TEXT,
             ),
-            marker=dict(
-                size=8,
-                color="white",
+            title_font=dict(size=14),
+            automargin=True,
+            zeroline=False,
+        )
+
+        fig.update_yaxes(
+            title_text="",
+            tickfont=dict(
+                size=13,
+                color=COLOR_TEXT,
+            ),
+            title_font=dict(size=14),
+            automargin=True,
+            zeroline=False,
+        )
+
+        if horizontal:
+            fig.update_xaxes(
+                showgrid=True,
+                gridcolor=COLOR_GRID,
+                gridwidth=1,
+            )
+            fig.update_yaxes(showgrid=False)
+
+        else:
+            fig.update_xaxes(showgrid=False)
+            fig.update_yaxes(
+                showgrid=True,
+                gridcolor=COLOR_GRID,
+                gridwidth=1,
+            )
+
+        return fig
+
+
+    def render_plotly_chart(fig):
+        """
+        Streamlit Plotly 출력 공통 설정
+        """
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={
+                "displayModeBar": False,
+                "responsive": True,
+            },
+        )
+
+
+    st.markdown("##### 📈 세부 필터 항목별 사고 현황")
+
+
+    # ============================================================
+    # 6-3. 필터링 결과가 있는 경우
+    # ============================================================
+
+    if not filtered_df.empty:
+
+        # ========================================================
+        # 첫 번째 줄: 연도별 / 사고분류 / 사고종별
+        # ========================================================
+
+        row1_col1, row1_col2, row1_col3 = st.columns(3)
+
+        # --------------------------------------------------------
+        # 발생 연도별 추이
+        # --------------------------------------------------------
+        with row1_col1:
+            st.markdown("**📅 발생 연도별 추이**")
+
+            year_counts = (
+                filtered_df["acdnt_year"]
+                .value_counts()
+                .sort_index()
+                .rename_axis("연도")
+                .reset_index(name="사고건수")
+            )
+
+            fig_line = px.line(
+                year_counts,
+                x="연도",
+                y="사고건수",
+                markers=True,
+            )
+
+            fig_line.update_traces(
                 line=dict(
                     color=COLOR_PRIMARY,
-                    width=2.5,
+                    width=3,
                 ),
-            ),
-            hovertemplate=(
-                "<b>%{x}년</b><br>"
-                "사고 건수: %{y:,}건"
-                "<extra></extra>"
-            ),
-        )
-
-        fig_line.update_xaxes(
-            dtick=1,
-        )
-
-        fig_line = apply_common_chart_style(
-            fig_line,
-            height=300,
-        )
-
-        render_plotly_chart(fig_line)
-
-    # --------------------------------------------------------
-    # 사고분류 도넛차트
-    # --------------------------------------------------------
-    with row1_col2:
-        st.markdown("**📂 사고 분류 비율**")
-
-        accident_class_order = [
-            "사망사고",
-            "중상사고",
-            "경상사고",
-            "부상신고사고",
-        ]
-
-        type_counts = (
-            filtered_df["acdnt_gae_dc"]
-            .value_counts()
-            .reindex(accident_class_order)
-            .dropna()
-            .rename_axis("사고분류")
-            .reset_index(name="사고건수")
-        )
-
-        fig_type = px.pie(
-            type_counts,
-            values="사고건수",
-            names="사고분류",
-            hole=0.58,
-            color="사고분류",
-            color_discrete_map=ACCIDENT_CLASS_COLORS,
-        )
-
-        fig_type.update_traces(
-            textposition="outside",
-            textinfo="percent",
-            textfont=dict(size=13),
-            marker=dict(
-                line=dict(
+                marker=dict(
+                    size=8,
                     color="white",
-                    width=2,
-                )
-            ),
-            hovertemplate=(
-                "<b>%{label}</b><br>"
-                "사고 건수: %{value:,}건<br>"
-                "비율: %{percent}"
-                "<extra></extra>"
-            ),
-        )
-
-        fig_type.update_layout(
-            height=300,
-            margin=dict(
-                l=20,
-                r=20,
-                t=10,
-                b=10,
-            ),
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(
-                family='"Malgun Gothic", sans-serif',
-                size=13,
-                color=COLOR_TEXT,
-            ),
-            showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=12),
-                title=None,
-            ),
-            uniformtext=dict(
-                mode="hide",
-                minsize=12,
-            ),
-        )
-
-        fig_type.add_annotation(
-            x=0.5,
-            y=0.5,
-            text=(
-                f"<b>{type_counts['사고건수'].sum():,}</b>"
-                "<br><span style='font-size:12px'>전체 사고</span>"
-            ),
-            showarrow=False,
-            font=dict(
-                size=18,
-                color=COLOR_TEXT,
-            ),
-        )
-
-        render_plotly_chart(fig_type)
-
-    # --------------------------------------------------------
-    # 사고종별 도넛차트
-    # --------------------------------------------------------
-    with row1_col3:
-        st.markdown("**🚑 사고 종별 비율**")
-
-        accident_type_order = [
-            "차대차",
-            "차대사람",
-            "차량단독",
-        ]
-
-        hdc_counts = (
-            filtered_df["acdnt_hdc"]
-            .value_counts()
-            .reindex(accident_type_order)
-            .dropna()
-            .rename_axis("사고종별")
-            .reset_index(name="사고건수")
-        )
-
-        fig_hdc = px.pie(
-            hdc_counts,
-            values="사고건수",
-            names="사고종별",
-            hole=0.58,
-            color="사고종별",
-            color_discrete_map=ACCIDENT_TYPE_COLORS,
-        )
-
-        fig_hdc.update_traces(
-            textposition="outside",
-            textinfo="percent",
-            textfont=dict(size=13),
-            marker=dict(
-                line=dict(
-                    color="white",
-                    width=2,
-                )
-            ),
-            hovertemplate=(
-                "<b>%{label}</b><br>"
-                "사고 건수: %{value:,}건<br>"
-                "비율: %{percent}"
-                "<extra></extra>"
-            ),
-        )
-
-        fig_hdc.update_layout(
-            height=300,
-            margin=dict(
-                l=20,
-                r=20,
-                t=10,
-                b=10,
-            ),
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(
-                family='"Malgun Gothic", sans-serif',
-                size=13,
-                color=COLOR_TEXT,
-            ),
-            showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=12),
-                title=None,
-            ),
-            uniformtext=dict(
-                mode="hide",
-                minsize=12,
-            ),
-        )
-
-        fig_hdc.add_annotation(
-            x=0.5,
-            y=0.5,
-            text=(
-                f"<b>{hdc_counts['사고건수'].sum():,}</b>"
-                "<br><span style='font-size:12px'>전체 사고</span>"
-            ),
-            showarrow=False,
-            font=dict(
-                size=18,
-                color=COLOR_TEXT,
-            ),
-        )
-
-        render_plotly_chart(fig_hdc)
-
-    # ========================================================
-    # 두 번째 줄: 차량 분석
-    # ========================================================
-
-    st.markdown("---")
-    st.markdown("##### 🚗 차량 분석")
-
-    row2_col1, row2_col2 = st.columns(2)
-
-    # --------------------------------------------------------
-# 가해차량 차종
-# --------------------------------------------------------
-    with row2_col1:
-        st.markdown("**🚗 가해차량 차종**")
-
-        wrngdo_counts = (
-            filtered_df["wrngdo_vhcle_asort_dc"]
-            .dropna()
-            .value_counts()
-            .rename_axis("차종")
-            .reset_index(name="사고건수")
-            .sort_values("사고건수", ascending=False)
-        )
-
-        fig_wrngdo = px.bar(
-            wrngdo_counts,
-            x="사고건수",
-            y="차종",
-            orientation="h",
-            color="차종",
-            color_discrete_sequence=VEHICLE_COLORS,
-            text="사고건수",
-        )
-
-        fig_wrngdo.update_traces(
-            texttemplate="%{text:,}",
-            textposition="outside",
-            textfont=dict(size=13),
-            cliponaxis=False,
-            marker_line_width=0,
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "사고 건수: %{x:,}건"
-                "<extra></extra>"
-            ),
-        )
-
-        fig_wrngdo = apply_common_chart_style(
-            fig_wrngdo,
-            height=max(330, len(wrngdo_counts) * 36),
-            horizontal=True,
-        )
-
-        # 건수가 가장 많은 차종을 위쪽에 표시
-        fig_wrngdo.update_yaxes(
-            autorange="reversed",
-            categoryorder="array",
-            categoryarray=wrngdo_counts["차종"].tolist(),
-        )
-
-        render_plotly_chart(fig_wrngdo)
-
-    # --------------------------------------------------------
-# 피해차량 차종
-# --------------------------------------------------------
-    with row2_col2:
-        st.markdown("**🚙 피해차량 차종**")
-
-        # 실제 결측값 제거
-        dmge_series = (
-            filtered_df["dmge_vhcle_asort_dc"]
-            .dropna()
-        )
-
-        # 문자열로 저장된 nan도 제거
-        dmge_series = dmge_series[
-            dmge_series.astype(str)
-            .str.strip()
-            .str.lower()
-            .ne("nan")
-        ]
-
-        dmge_counts = (
-            dmge_series
-            .value_counts()
-            .rename_axis("차종")
-            .reset_index(name="사고건수")
-            .sort_values("사고건수", ascending=False)
-        )
-
-        fig_dmge = px.bar(
-            dmge_counts,
-            x="사고건수",
-            y="차종",
-            orientation="h",
-            color="차종",
-            color_discrete_sequence=VEHICLE_COLORS,
-            text="사고건수",
-        )
-
-        fig_dmge.update_traces(
-            texttemplate="%{text:,}",
-            textposition="outside",
-            textfont=dict(size=13),
-            cliponaxis=False,
-            marker_line_width=0,
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "사고 건수: %{x:,}건"
-                "<extra></extra>"
-            ),
-        )
-
-        fig_dmge = apply_common_chart_style(
-            fig_dmge,
-            height=max(330, len(dmge_counts) * 36),
-            horizontal=True,
-        )
-
-        # 건수가 가장 많은 차종을 위쪽에 표시
-        fig_dmge.update_yaxes(
-            autorange="reversed",
-            categoryorder="array",
-            categoryarray=dmge_counts["차종"].tolist(),
-        )
-
-        render_plotly_chart(fig_dmge)
-
-    # ========================================================
-    # 세 번째 줄: 사망사고 분석
-    # ========================================================
-
-    st.markdown("---")
-    st.markdown("##### 🚨 사망사고 분석")
-
-    row3_col1, row3_col2 = st.columns(2)
-
-
-# --------------------------------------------------------
-# 사망자 유형
-# --------------------------------------------------------
-# --------------------------------------------------------
-# 사망자 유형
-# --------------------------------------------------------
-    with row3_col1:
-        st.markdown("**🚨 사망자 유형**")
-
-        fatal_type_counts = (
-            filtered_df["fatal_type"]
-            .dropna()
-            .value_counts()
-            .rename_axis("사망자 유형")
-            .reset_index(name="사망사고 건수")
-            .sort_values("사망사고 건수", ascending=False)
-        )
-
-        if not fatal_type_counts.empty:
-            fig_fatal_type = px.bar(
-                fatal_type_counts,
-                x="사망사고 건수",
-                y="사망자 유형",
-                orientation="h",
-                color="사망자 유형",
-                color_discrete_sequence=FATAL_COLORS,
-                text="사망사고 건수",
-            )
-
-            fig_fatal_type.update_traces(
-                texttemplate="%{text:,}",
-                textposition="outside",
-                textfont=dict(size=13),
-                cliponaxis=False,
-                marker_line_width=0,
+                    line=dict(
+                        color=COLOR_PRIMARY,
+                        width=2.5,
+                    ),
+                ),
                 hovertemplate=(
-                    "<b>%{y}</b><br>"
-                    "사망사고 건수: %{x:,}건"
+                    "<b>%{x}년</b><br>"
+                    "사고 건수: %{y:,}건"
                     "<extra></extra>"
                 ),
             )
 
-            fig_fatal_type = apply_common_chart_style(
-                fig_fatal_type,
-                height=max(330, len(fatal_type_counts) * 38),
-                horizontal=True,
+            fig_line.update_xaxes(
+                dtick=1,
             )
 
-            # 건수가 가장 많은 유형부터 위쪽에 표시
-            fig_fatal_type.update_yaxes(
-                autorange="reversed",
-                categoryorder="array",
-                categoryarray=fatal_type_counts[
-                    "사망자 유형"
-                ].tolist(),
+            fig_line = apply_common_chart_style(
+                fig_line,
+                height=300,
             )
 
-            render_plotly_chart(fig_fatal_type)
+            render_plotly_chart(fig_line)
 
-        else:
-            st.info(
-                "선택된 조건에 해당하는 "
-                "사망자 유형 데이터가 없습니다."
+        # --------------------------------------------------------
+        # 사고분류 도넛차트
+        # --------------------------------------------------------
+        with row1_col2:
+            st.markdown("**📂 사고 분류 비율**")
+
+            accident_class_order = [
+                "사망사고",
+                "중상사고",
+                "경상사고",
+                "부상신고사고",
+            ]
+
+            type_counts = (
+                filtered_df["acdnt_gae_dc"]
+                .value_counts()
+                .reindex(accident_class_order)
+                .dropna()
+                .rename_axis("사고분류")
+                .reset_index(name="사고건수")
             )
 
-
-    # --------------------------------------------------------
-    # 사망자 연령대
-    # --------------------------------------------------------
-    with row3_col2:
-        st.markdown("**👤 사망자 연령대**")
-
-        fatal_age_order = [
-            "20세 이하",
-            "21-30세",
-            "31-40세",
-            "41-50세",
-            "51-60세",
-            "61-70세",
-            "71세 이상",
-            "미상",
-        ]
-
-        fatal_age_counts = (
-            filtered_df["fatal_age_group"]
-            .dropna()
-            .value_counts()
-            .reindex(fatal_age_order)
-            .dropna()
-            .rename_axis("사망자 연령대")
-            .reset_index(name="사망사고 건수")
-        )
-
-        # 가로 막대에서 위쪽부터 낮은 연령대로 보이도록 역순 배치
-        fatal_age_counts = fatal_age_counts.iloc[::-1]
-
-        if not fatal_age_counts.empty:
-
-            fig_fatal_age = px.bar(
-                fatal_age_counts,
-                x="사망사고 건수",
-                y="사망자 연령대",
-                orientation="h",
-                color="사망자 연령대",
-                color_discrete_sequence=FATAL_COLORS,
-                text="사망사고 건수",
+            fig_type = px.pie(
+                type_counts,
+                values="사고건수",
+                names="사고분류",
+                hole=0.58,
+                color="사고분류",
+                color_discrete_map=ACCIDENT_CLASS_COLORS,
             )
 
-            fig_fatal_age.update_traces(
-                texttemplate="%{text:,}",
+            fig_type.update_traces(
                 textposition="outside",
+                textinfo="percent",
                 textfont=dict(size=13),
-                cliponaxis=False,
-                marker_line_width=0,
+                marker=dict(
+                    line=dict(
+                        color="white",
+                        width=2,
+                    )
+                ),
                 hovertemplate=(
-                    "<b>%{y}</b><br>"
-                    "사망사고 건수: %{x:,}건"
+                    "<b>%{label}</b><br>"
+                    "사고 건수: %{value:,}건<br>"
+                    "비율: %{percent}"
                     "<extra></extra>"
                 ),
             )
 
-            fig_fatal_age = apply_common_chart_style(
-                fig_fatal_age,
-                height=max(330, len(fatal_age_counts) * 38),
-                horizontal=True,
+            fig_type.update_layout(
+                height=300,
+                margin=dict(
+                    l=20,
+                    r=20,
+                    t=10,
+                    b=10,
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(
+                    family='"Malgun Gothic", sans-serif',
+                    size=13,
+                    color=COLOR_TEXT,
+                ),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.02,
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=12),
+                    title=None,
+                ),
+                uniformtext=dict(
+                    mode="hide",
+                    minsize=12,
+                ),
             )
 
-            render_plotly_chart(fig_fatal_age)
-
-        else:
-            st.info(
-                "선택된 조건에 해당하는 "
-                "사망자 연령대 데이터가 없습니다."
+            fig_type.add_annotation(
+                x=0.5,
+                y=0.5,
+                text=(
+                    f"<b>{type_counts['사고건수'].sum():,}</b>"
+                    "<br><span style='font-size:12px'>전체 사고</span>"
+                ),
+                showarrow=False,
+                font=dict(
+                    size=18,
+                    color=COLOR_TEXT,
+                ),
             )
 
-    # ========================================================
-    # 네 번째 줄: 상황별 사고 분석
-    # ========================================================
+            render_plotly_chart(fig_type)
 
-    st.markdown("---")
-    st.markdown("##### ⏱️ 상황별 사고 분석")
+        # --------------------------------------------------------
+        # 사고종별 도넛차트
+        # --------------------------------------------------------
+        with row1_col3:
+            st.markdown("**🚑 사고 종별 비율**")
 
-    row4_col1, row4_col2 = st.columns(2)
+            accident_type_order = [
+                "차대차",
+                "차대사람",
+                "차량단독",
+            ]
 
-    # --------------------------------------------------------
-    # 시간대별
-    # --------------------------------------------------------
-    with row4_col1:
-        st.markdown("**⏰ 시간대별**")
-
-        time_counts = (
-            filtered_df["time_num"]
-            .value_counts()
-            .rename_axis("시간")
-            .reset_index(name="사고건수")
-        )
-
-        # 자정을 넘는 시간대는 시작시간부터 순서대로 정렬
-        if start_time > end_time:
-            time_order = (
-                list(range(start_time, 24))
-                + list(range(0, end_time + 1))
+            hdc_counts = (
+                filtered_df["acdnt_hdc"]
+                .value_counts()
+                .reindex(accident_type_order)
+                .dropna()
+                .rename_axis("사고종별")
+                .reset_index(name="사고건수")
             )
 
-            time_counts["시간순서"] = pd.Categorical(
-                time_counts["시간"],
-                categories=time_order,
-                ordered=True,
+            fig_hdc = px.pie(
+                hdc_counts,
+                values="사고건수",
+                names="사고종별",
+                hole=0.58,
+                color="사고종별",
+                color_discrete_map=ACCIDENT_TYPE_COLORS,
             )
 
-            time_counts = (
-                time_counts
-                .sort_values("시간순서")
-                .drop(columns=["시간순서"])
+            fig_hdc.update_traces(
+                textposition="outside",
+                textinfo="percent",
+                textfont=dict(size=13),
+                marker=dict(
+                    line=dict(
+                        color="white",
+                        width=2,
+                    )
+                ),
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "사고 건수: %{value:,}건<br>"
+                    "비율: %{percent}"
+                    "<extra></extra>"
+                ),
             )
 
-        # 일반 시간대는 숫자 순서대로 정렬
-        else:
-            time_counts = time_counts.sort_values("시간")
-
-        # 그래프 표시용 라벨
-        time_counts["시간표시"] = (
-            time_counts["시간"]
-            .astype(int)
-            .map(lambda x: f"{x:02d}시")
-        )
-
-        fig_time = px.bar(
-            time_counts,
-            x="시간표시",
-            y="사고건수",
-            text="사고건수",
-            color="사고건수",
-            color_continuous_scale=[
-                [0.0, "#DBEAFE"],
-                [0.5, "#60A5FA"],
-                [1.0, "#1D4ED8"],
-            ],
-        )
-
-        fig_time.update_traces(
-            texttemplate="%{text:,}",
-            textposition="outside",
-            textfont=dict(size=12),
-            cliponaxis=False,
-            marker_line_width=0,
-            hovertemplate=(
-                "<b>%{x}</b><br>"
-                "사고 건수: %{y:,}건"
-                "<extra></extra>"
-            ),
-        )
-
-        fig_time.update_xaxes(
-            categoryorder="array",
-            categoryarray=time_counts["시간표시"].tolist(),
-            tickangle=-45 if len(time_counts) > 12 else 0,
-        )
-
-        fig_time.update_coloraxes(showscale=False)
-
-        fig_time = apply_common_chart_style(
-            fig_time,
-            height=350,
-        )
-
-        render_plotly_chart(fig_time)
-
-    # --------------------------------------------------------
-    # 법규위반별
-    # --------------------------------------------------------
-    with row4_col2:
-        st.markdown("**⚖️ 법규위반별**")
-
-        violt_counts = (
-            filtered_df["lrg_violt_1_dc"]
-            .value_counts()
-            .rename_axis("법규위반유형")
-            .reset_index(name="사고건수")
-        )
-
-        # '기타'를 마지막에 배치
-        violt_counts["is_etc"] = (
-            violt_counts["법규위반유형"]
-            .astype(str)
-            .eq("기타")
-        )
-
-        violt_counts = (
-            violt_counts
-            .sort_values(
-                by=["is_etc", "사고건수"],
-                ascending=[False, True],
+            fig_hdc.update_layout(
+                height=300,
+                margin=dict(
+                    l=20,
+                    r=20,
+                    t=10,
+                    b=10,
+                ),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(
+                    family='"Malgun Gothic", sans-serif',
+                    size=13,
+                    color=COLOR_TEXT,
+                ),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.02,
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=12),
+                    title=None,
+                ),
+                uniformtext=dict(
+                    mode="hide",
+                    minsize=12,
+                ),
             )
-            .drop(columns=["is_etc"])
-        )
 
-        fig_violt = px.bar(
-            violt_counts,
-            x="사고건수",
-            y="법규위반유형",
-            orientation="h",
-            text="사고건수",
-            color="사고건수",
-            color_continuous_scale=[
-                [0.0, "#FEF3C7"],
-                [0.5, "#FB923C"],
-                [1.0, "#C2410C"],
-            ],
-        )
+            fig_hdc.add_annotation(
+                x=0.5,
+                y=0.5,
+                text=(
+                    f"<b>{hdc_counts['사고건수'].sum():,}</b>"
+                    "<br><span style='font-size:12px'>전체 사고</span>"
+                ),
+                showarrow=False,
+                font=dict(
+                    size=18,
+                    color=COLOR_TEXT,
+                ),
+            )
 
-        fig_violt.update_traces(
-            texttemplate="%{text:,}",
-            textposition="outside",
-            textfont=dict(size=13),
-            cliponaxis=False,
-            marker_line_width=0,
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "사고 건수: %{x:,}건"
-                "<extra></extra>"
-            ),
-        )
+            render_plotly_chart(fig_hdc)
 
-        fig_violt.update_coloraxes(showscale=False)
-
-        fig_violt = apply_common_chart_style(
-            fig_violt,
-            height=max(350, len(violt_counts) * 38),
-            horizontal=True,
-        )
-
-        render_plotly_chart(fig_violt)
+        with st.expander("🚗 차량 분석", expanded=True):
+            # ========================================================
+            # 두 번째 줄: 차량 분석
+            # ========================================================
 
 
-# ============================================================
-# 6-4. 필터링 결과가 없는 경우
-# ============================================================
+            row2_col1, row2_col2 = st.columns(2)
 
-else:
-    st.info(
-        "선택된 필터 조건에 부합하는 데이터가 존재하지 않아 "
-        "그래프를 표시할 수 없습니다."
-    )
+            # --------------------------------------------------------
+        # 가해차량 차종
+        # --------------------------------------------------------
+            with row2_col1:
+                st.markdown("**🚗 가해차량 차종**")
+
+                wrngdo_counts = (
+                    filtered_df["wrngdo_vhcle_asort_dc"]
+                    .dropna()
+                    .value_counts()
+                    .rename_axis("차종")
+                    .reset_index(name="사고건수")
+                    .sort_values("사고건수", ascending=False)
+                )
+
+                fig_wrngdo = px.bar(
+                    wrngdo_counts,
+                    x="사고건수",
+                    y="차종",
+                    orientation="h",
+                    text="사고건수",
+                    color="사고건수",
+                    color_continuous_scale=(
+                        CHART_COLOR_SCALES["offending_vehicle"]
+                    ),
+                )
+
+                fig_wrngdo.update_traces(
+                    texttemplate="%{text:,}",
+                    textposition="outside",
+                    textfont=dict(size=13),
+                    cliponaxis=False,
+                    marker_line_width=0,
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "사고 건수: %{x:,}건"
+                        "<extra></extra>"
+                    ),
+                )
+
+                fig_wrngdo.update_coloraxes(
+                    showscale=False,
+                )
+
+                fig_wrngdo = apply_common_chart_style(
+                    fig_wrngdo,
+                    height=max(330, len(wrngdo_counts) * 36),
+                    horizontal=True,
+                )
+
+                # 건수가 가장 많은 차종을 위쪽에 표시
+                fig_wrngdo.update_yaxes(
+                    autorange="reversed",
+                    categoryorder="array",
+                    categoryarray=wrngdo_counts["차종"].tolist(),
+                )
+
+                render_plotly_chart(fig_wrngdo)
+
+            # --------------------------------------------------------
+        # 피해차량 차종
+        # --------------------------------------------------------
+            with row2_col2:
+                st.markdown("**🚙 피해차량 차종**")
+
+                # 실제 결측값 제거
+                dmge_series = (
+                    filtered_df["dmge_vhcle_asort_dc"]
+                    .dropna()
+                )
+
+                # 문자열로 저장된 nan도 제거
+                dmge_series = dmge_series[
+                    dmge_series.astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .ne("nan")
+                ]
+
+                dmge_counts = (
+                    dmge_series
+                    .value_counts()
+                    .rename_axis("차종")
+                    .reset_index(name="사고건수")
+                    .sort_values("사고건수", ascending=False)
+                )
+
+                fig_dmge = px.bar(
+                    dmge_counts,
+                    x="사고건수",
+                    y="차종",
+                    orientation="h",
+                    text="사고건수",
+                    color="사고건수",
+                    color_continuous_scale=(
+                        CHART_COLOR_SCALES["damaged_vehicle"]
+                    ),
+                )
+
+                fig_dmge.update_traces(
+                    texttemplate="%{text:,}",
+                    textposition="outside",
+                    textfont=dict(size=13),
+                    cliponaxis=False,
+                    marker_line_width=0,
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "사고 건수: %{x:,}건"
+                        "<extra></extra>"
+                    ),
+                )
+
+                fig_dmge.update_coloraxes(
+                    showscale=False,
+                )
+
+                fig_dmge = apply_common_chart_style(
+                    fig_dmge,
+                    height=max(330, len(dmge_counts) * 36),
+                    horizontal=True,
+                )
+
+                # 건수가 가장 많은 차종을 위쪽에 표시
+                fig_dmge.update_yaxes(
+                    autorange="reversed",
+                    categoryorder="array",
+                    categoryarray=dmge_counts["차종"].tolist(),
+                )
+
+                render_plotly_chart(fig_dmge)
+        with st.expander("🚨 사망사고 분석", expanded=True):
+            # ========================================================
+            # 세 번째 줄: 사망사고 분석
+            # ========================================================
+
+
+            row3_col1, row3_col2 = st.columns(2)
+
+
+        # --------------------------------------------------------
+        # 사망자 유형
+        # --------------------------------------------------------
+        # --------------------------------------------------------
+        # 사망자 유형
+        # --------------------------------------------------------
+            with row3_col1:
+                st.markdown("**🚨 사망자 유형**")
+
+                fatal_type_counts = (
+                    filtered_df["fatal_type"]
+                    .dropna()
+                    .value_counts()
+                    .rename_axis("사망자 유형")
+                    .reset_index(name="사망사고 건수")
+                    .sort_values("사망사고 건수", ascending=False)
+                )
+
+                if not fatal_type_counts.empty:
+                    fig_fatal_type = px.bar(
+                        fatal_type_counts,
+                        x="사망사고 건수",
+                        y="사망자 유형",
+                        orientation="h",
+                        text="사망사고 건수",
+                        color="사망사고 건수",
+                        color_continuous_scale=(
+                            CHART_COLOR_SCALES["fatal_type"]
+                        ),
+                    )
+
+                    fig_fatal_type.update_traces(
+                        texttemplate="%{text:,}",
+                        textposition="outside",
+                        textfont=dict(size=13),
+                        cliponaxis=False,
+                        marker_line_width=0,
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "사망사고 건수: %{x:,}건"
+                            "<extra></extra>"
+                        ),
+                    )
+
+                    fig_fatal_type.update_coloraxes(
+                        showscale=False,
+                    )
+
+                    fig_fatal_type = apply_common_chart_style(
+                        fig_fatal_type,
+                        height=max(330, len(fatal_type_counts) * 38),
+                        horizontal=True,
+                    )
+
+                    # 건수가 가장 많은 유형부터 위쪽에 표시
+                    fig_fatal_type.update_yaxes(
+                        autorange="reversed",
+                        categoryorder="array",
+                        categoryarray=fatal_type_counts[
+                            "사망자 유형"
+                        ].tolist(),
+                    )
+
+                    render_plotly_chart(fig_fatal_type)
+
+                else:
+                    st.info(
+                        "선택된 조건에 해당하는 "
+                        "사망자 유형 데이터가 없습니다."
+                    )
+
+
+            # --------------------------------------------------------
+            # 사망자 연령대
+            # --------------------------------------------------------
+            with row3_col2:
+                st.markdown("**👤 사망자 연령대**")
+
+                fatal_age_order = [
+                    "20세 이하",
+                    "21-30세",
+                    "31-40세",
+                    "41-50세",
+                    "51-60세",
+                    "61-70세",
+                    "71세 이상",
+                    "미상",
+                ]
+
+                fatal_age_counts = (
+                    filtered_df["fatal_age_group"]
+                    .dropna()
+                    .value_counts()
+                    .reindex(fatal_age_order)
+                    .dropna()
+                    .rename_axis("사망자 연령대")
+                    .reset_index(name="사망사고 건수")
+                )
+
+                # 가로 막대에서 위쪽부터 낮은 연령대로 보이도록 역순 배치
+                fatal_age_counts = fatal_age_counts.iloc[::-1]
+
+                if not fatal_age_counts.empty:
+
+                    fig_fatal_age = px.bar(
+                        fatal_age_counts,
+                        x="사망사고 건수",
+                        y="사망자 연령대",
+                        orientation="h",
+                        text="사망사고 건수",
+                        color="사망사고 건수",
+                        color_continuous_scale=(
+                            CHART_COLOR_SCALES["fatal_age"]
+                        ),
+                    )
+
+                    fig_fatal_age.update_traces(
+                        texttemplate="%{text:,}",
+                        textposition="outside",
+                        textfont=dict(size=13),
+                        cliponaxis=False,
+                        marker_line_width=0,
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "사망사고 건수: %{x:,}건"
+                            "<extra></extra>"
+                        ),
+                    )
+
+                    fig_fatal_age.update_coloraxes(
+                        showscale=False,
+                    )
+
+                    fig_fatal_age = apply_common_chart_style(
+                        fig_fatal_age,
+                        height=max(330, len(fatal_age_counts) * 38),
+                        horizontal=True,
+                    )
+
+                    render_plotly_chart(fig_fatal_age)
+
+                else:
+                    st.info(
+                        "선택된 조건에 해당하는 "
+                        "사망자 연령대 데이터가 없습니다."
+                    )
+        with st.expander("⏱️ 상황별 사고 분석", expanded=True):
+            # ========================================================
+            # 네 번째 줄: 상황별 사고 분석
+            # 요일별 → 시간대별 → 법규위반별
+            # ========================================================
+
+
+            row4_col1, row4_col2, row4_col3 = st.columns(3)
+
+
+            # --------------------------------------------------------
+            # 요일별
+            # --------------------------------------------------------
+            with row4_col1:
+                st.markdown("**📅 요일별**")
+
+                weekday_order = [
+                    "월요일",
+                    "화요일",
+                    "수요일",
+                    "목요일",
+                    "금요일",
+                    "토요일",
+                    "일요일",
+                ]
+
+                weekday_short_name = {
+                    "월요일": "월",
+                    "화요일": "화",
+                    "수요일": "수",
+                    "목요일": "목",
+                    "금요일": "금",
+                    "토요일": "토",
+                    "일요일": "일",
+                }
+
+                weekday_counts = (
+                    filtered_df["dfk_dc"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .value_counts()
+                    .reindex(weekday_order, fill_value=0)
+                    .rename_axis("요일원본")
+                    .reset_index(name="사고건수")
+                )
+
+                # 화면에는 한 글자로 표시
+                weekday_counts["요일"] = (
+                    weekday_counts["요일원본"]
+                    .map(weekday_short_name)
+                )
+
+                # 데이터에 존재하지 않는 요일은 제외
+                weekday_counts = weekday_counts[
+                    weekday_counts["사고건수"] > 0
+                ]
+
+                if not weekday_counts.empty:
+                    fig_weekday = px.bar(
+                        weekday_counts,
+                        x="요일",
+                        y="사고건수",
+                        text="사고건수",
+                        color="사고건수",
+                        color_continuous_scale=(
+                            CHART_COLOR_SCALES["weekday"]
+                        ),
+                    )
+
+                    fig_weekday.update_traces(
+                        texttemplate="%{text:,}",
+                        textposition="outside",
+                        textfont=dict(size=12),
+                        cliponaxis=False,
+                        marker_line_width=0,
+                        hovertemplate=(
+                            "<b>%{x}요일</b><br>"
+                            "사고 건수: %{y:,}건"
+                            "<extra></extra>"
+                        ),
+                    )
+
+                    fig_weekday.update_xaxes(
+                        categoryorder="array",
+                        categoryarray=[
+                            weekday_short_name[weekday]
+                            for weekday in weekday_order
+                        ],
+                    )
+
+                    fig_weekday.update_coloraxes(
+                        showscale=False
+                    )
+
+                    fig_weekday = apply_common_chart_style(
+                        fig_weekday,
+                        height=350,
+                    )
+
+                    render_plotly_chart(fig_weekday)
+
+                else:
+                    st.info(
+                        "선택된 조건에 해당하는 "
+                        "요일 데이터가 없습니다."
+                    )
+
+
+            # --------------------------------------------------------
+            # 시간대별
+            # --------------------------------------------------------
+            with row4_col2:
+                st.markdown("**⏰ 시간대별**")
+
+                time_counts = (
+                    filtered_df["time_num"]
+                    .value_counts()
+                    .rename_axis("시간")
+                    .reset_index(name="사고건수")
+                )
+
+                # 자정을 넘는 시간대는 시작시간부터 순서대로 정렬
+                if start_time > end_time:
+                    time_order = (
+                        list(range(start_time, 24))
+                        + list(range(0, end_time + 1))
+                    )
+
+                    time_counts["시간순서"] = pd.Categorical(
+                        time_counts["시간"],
+                        categories=time_order,
+                        ordered=True,
+                    )
+
+                    time_counts = (
+                        time_counts
+                        .sort_values("시간순서")
+                        .drop(columns=["시간순서"])
+                    )
+
+                else:
+                    time_counts = (
+                        time_counts
+                        .sort_values("시간")
+                    )
+
+                time_counts["시간표시"] = (
+                    time_counts["시간"]
+                    .astype(int)
+                    .map(lambda value: f"{value:02d}시")
+                )
+
+                if not time_counts.empty:
+                    fig_time = px.bar(
+                        time_counts,
+                        x="시간표시",
+                        y="사고건수",
+                        text="사고건수",
+                        color="사고건수",
+                        color_continuous_scale=(
+                            CHART_COLOR_SCALES["time"]
+                        ),
+                    )
+
+                    fig_time.update_traces(
+                        texttemplate="%{text:,}",
+                        textposition="outside",
+                        textfont=dict(size=11),
+                        cliponaxis=False,
+                        marker_line_width=0,
+                        hovertemplate=(
+                            "<b>%{x}</b><br>"
+                            "사고 건수: %{y:,}건"
+                            "<extra></extra>"
+                        ),
+                    )
+
+                    fig_time.update_xaxes(
+                        categoryorder="array",
+                        categoryarray=(
+                            time_counts["시간표시"]
+                            .tolist()
+                        ),
+                        tickangle=-45,
+                    )
+
+                    fig_time.update_coloraxes(
+                        showscale=False
+                    )
+
+                    fig_time = apply_common_chart_style(
+                        fig_time,
+                        height=350,
+                    )
+
+                    render_plotly_chart(fig_time)
+
+                else:
+                    st.info(
+                        "선택된 조건에 해당하는 "
+                        "시간대 데이터가 없습니다."
+                    )
+
+
+            # --------------------------------------------------------
+            # 법규위반별
+            # --------------------------------------------------------
+            with row4_col3:
+                st.markdown("**⚖️ 법규위반별**")
+
+                violt_counts = (
+                    filtered_df["lrg_violt_1_dc"]
+                    .dropna()
+                    .value_counts()
+                    .rename_axis("법규위반유형")
+                    .reset_index(name="사고건수")
+                )
+
+                # 기타를 가장 아래에 표시하기 위한 정렬
+                violt_counts["is_etc"] = (
+                    violt_counts["법규위반유형"]
+                    .astype(str)
+                    .eq("기타")
+                )
+
+                violt_counts = (
+                    violt_counts
+                    .sort_values(
+                        by=["is_etc", "사고건수"],
+                        ascending=[False, True],
+                    )
+                    .drop(columns=["is_etc"])
+                )
+
+                if not violt_counts.empty:
+                    fig_violt = px.bar(
+                        violt_counts,
+                        x="사고건수",
+                        y="법규위반유형",
+                        orientation="h",
+                        text="사고건수",
+                        color="사고건수",
+                        color_continuous_scale=(
+                            CHART_COLOR_SCALES["violation"]
+                        ),
+                    )
+
+                    fig_violt.update_traces(
+                        texttemplate="%{text:,}",
+                        textposition="outside",
+                        textfont=dict(size=12),
+                        cliponaxis=False,
+                        marker_line_width=0,
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "사고 건수: %{x:,}건"
+                            "<extra></extra>"
+                        ),
+                    )
+
+                    fig_violt.update_coloraxes(
+                        showscale=False
+                    )
+
+                    fig_violt = apply_common_chart_style(
+                        fig_violt,
+                        height=max(
+                            350,
+                            len(violt_counts) * 35,
+                        ),
+                        horizontal=True,
+                    )
+
+                    render_plotly_chart(fig_violt)
+
+                else:
+                    st.info(
+                        "선택된 조건에 해당하는 "
+                        "법규위반 데이터가 없습니다."
+                    )
+
+    else:
+        st.warning("현재 필터 조건에 해당하는 사고 데이터가 없습니다.")
+

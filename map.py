@@ -2875,16 +2875,22 @@ st.markdown(
 
     /* =====================================================
        페이지 탭: 파일철 인덱스 스타일
-       선택 탭은 흰색 인덱스가 본문 노트와 연결되어 보임
+       로컬·Streamlit Community Cloud 양쪽 DOM 구조 대응
        ===================================================== */
 
+    /* 탭 전체 영역 */
+    div[data-testid="stTabs"] {
+        margin-top: 12px;
+    }
+
     /* 탭 인덱스가 놓이는 상단 레일 */
-    div[data-baseweb="tab-list"] {
+    div[data-testid="stTabs"] div[role="tablist"],
+    div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
+        display: flex;
         gap: 8px;
         align-items: flex-end;
         padding: 12px 14px 0 14px;
-        margin-top: 10px;
-        margin-bottom: 0;
+        margin: 0;
         border: 1px solid #CBD5E1;
         border-bottom: 0;
         border-radius: 16px 16px 0 0;
@@ -2892,68 +2898,117 @@ st.markdown(
         box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.02);
     }
 
-    /* 비선택 인덱스 탭 */
-    button[data-baseweb="tab"] {
+    /* 모든 인덱스 탭 */
+    div[data-testid="stTabs"] button[role="tab"],
+    div[data-testid="stTabs"] button[data-baseweb="tab"] {
         position: relative;
         z-index: 1;
-        min-height: 50px;
-        padding: 11px 25px;
-        margin-bottom: 0;
-        border: 1px solid #B8C4D4;
-        border-bottom: 1px solid #9AAAC0;
-        border-radius: 12px 12px 0 0;
-        background: #D7E0EC;
-        color: #475569;
-        font-size: 1.05rem;
-        font-weight: 750;
-        box-shadow: inset 0 -2px 3px rgba(15, 23, 42, 0.04);
-        transition: background 0.15s ease, color 0.15s ease,
-                    transform 0.15s ease;
-    }
-
-    button[data-baseweb="tab"] p {
+        flex: 0 0 auto;
+        min-height: 52px;
+        padding: 11px 26px;
         margin: 0;
-        color: inherit;
-        font-size: 1.05rem;
-        font-weight: 750;
+        border: 1px solid #B8C4D4 !important;
+        border-bottom: 1px solid #9AAAC0 !important;
+        border-radius: 12px 12px 0 0 !important;
+        background: #D7E0EC !important;
+        color: #475569 !important;
+        font-size: 1.05rem !important;
+        font-weight: 700 !important;
+        box-shadow: inset 0 -2px 3px rgba(15, 23, 42, 0.04);
+        transform: none;
+        transition:
+            background 0.15s ease,
+            color 0.15s ease,
+            transform 0.15s ease;
     }
 
-    button[data-baseweb="tab"]:hover {
-        background: #E2E8F0;
-        color: #1E3A8A;
+    /* 탭 내부 글자 */
+    div[data-testid="stTabs"] button[role="tab"] p,
+    div[data-testid="stTabs"] button[data-baseweb="tab"] p {
+        margin: 0 !important;
+        padding: 0 !important;
+        color: inherit !important;
+        font-size: 1.05rem !important;
+        font-weight: 700 !important;
+        white-space: nowrap;
+    }
+
+    /* 마우스를 올린 탭 */
+    div[data-testid="stTabs"] button[role="tab"]:hover,
+    div[data-testid="stTabs"] button[data-baseweb="tab"]:hover {
+        background: #E2E8F0 !important;
+        color: #1E3A8A !important;
         transform: translateY(-2px);
     }
 
-    /* 선택된 인덱스: 아래 노트 본문과 연결 */
+    /* 선택된 인덱스 탭 */
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"],
+    div[data-testid="stTabs"]
     button[data-baseweb="tab"][aria-selected="true"] {
-        z-index: 3;
+        z-index: 5;
         margin-bottom: -1px;
-        border-color: #94A3B8;
-        border-bottom-color: #FFFFFF;
-        background: #FFFFFF;
-        color: #1D4ED8;
-        box-shadow: 0 -3px 8px rgba(15, 23, 42, 0.08);
+        border-color: #94A3B8 !important;
+        border-bottom-color: #FFFFFF !important;
+        background: #FFFFFF !important;
+        color: #1D4ED8 !important;
+        box-shadow: 0 -3px 8px rgba(15, 23, 42, 0.09);
         transform: translateY(-3px);
     }
 
+    /* 선택된 탭 글자 */
+    div[data-testid="stTabs"]
+    button[role="tab"][aria-selected="true"] p,
+    div[data-testid="stTabs"]
     button[data-baseweb="tab"][aria-selected="true"] p {
-        color: #1D4ED8;
+        color: #1D4ED8 !important;
+        font-weight: 800 !important;
     }
 
-    /* Streamlit 기본 선택 밑줄 제거 */
-    div[data-baseweb="tab-highlight"] {
-        display: none;
+    /* Streamlit 기본 탭 선택선 제거 */
+    div[data-testid="stTabs"] div[data-baseweb="tab-highlight"],
+    div[data-testid="stTabs"] [data-testid="stTabsTabHighlight"] {
+        display: none !important;
     }
 
     /* 탭 아래 본문: 흰색 노트 페이지 */
-    div[data-baseweb="tab-panel"] {
+    div[data-testid="stTabs"] div[role="tabpanel"],
+    div[data-testid="stTabs"] div[data-baseweb="tab-panel"] {
         position: relative;
         z-index: 2;
+        min-height: 120px;
         padding: 22px 20px 26px 20px;
+        margin-top: 0;
         border: 1px solid #94A3B8;
         border-radius: 0 14px 14px 14px;
         background: #FFFFFF;
         box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+    }
+
+    /* 작은 화면 대응 */
+    @media (max-width: 768px) {
+        div[data-testid="stTabs"] div[role="tablist"],
+        div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
+            gap: 5px;
+            padding-left: 8px;
+            padding-right: 8px;
+            overflow-x: auto;
+        }
+
+        div[data-testid="stTabs"] button[role="tab"],
+        div[data-testid="stTabs"] button[data-baseweb="tab"] {
+            min-height: 46px;
+            padding: 9px 15px;
+        }
+
+        div[data-testid="stTabs"] button[role="tab"] p,
+        div[data-testid="stTabs"] button[data-baseweb="tab"] p {
+            font-size: 0.92rem !important;
+        }
+
+        div[data-testid="stTabs"] div[role="tabpanel"],
+        div[data-testid="stTabs"] div[data-baseweb="tab-panel"] {
+            padding: 16px 10px 20px 10px;
+        }
     }
 
     /* 접기 영역 */

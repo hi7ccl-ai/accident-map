@@ -2847,16 +2847,21 @@ folium.LayerControl(
 # ============================================================
 # 5. 대시보드 상단 요약 및 페이지 탭
 # ============================================================
+
 st.markdown(
     """
     <style>
-    /* 메인 화면 여백 */
+    /* =====================================================
+       메인 화면 여백
+       ===================================================== */
     .block-container {
         padding-top: 4rem;
         padding-bottom: 2.5rem;
     }
 
-    /* KPI 카드 */
+    /* =====================================================
+       KPI 카드
+       ===================================================== */
     div[data-testid="stMetric"] {
         background: #FFFFFF;
         border: 1px solid #E2E8F0;
@@ -2864,10 +2869,12 @@ st.markdown(
         padding: 14px 16px;
         box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
     }
+
     div[data-testid="stMetric"] label {
         color: #64748B;
         font-size: 0.88rem;
     }
+
     div[data-testid="stMetric"] [data-testid="stMetricValue"] {
         color: #0F172A;
         font-weight: 700;
@@ -2875,7 +2882,7 @@ st.markdown(
 
     /* =====================================================
        페이지 탭: 파일철 인덱스 스타일
-       로컬·Streamlit Community Cloud 양쪽 DOM 구조 대응
+       로컬·Streamlit Community Cloud 공통 대응
        ===================================================== */
 
     /* 탭 전체 영역 */
@@ -2884,130 +2891,129 @@ st.markdown(
     }
 
     /* 탭 인덱스가 놓이는 상단 레일 */
-    div[data-testid="stTabs"] div[role="tablist"],
-    div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
-        display: flex;
-        gap: 8px;
-        align-items: flex-end;
-        padding: 12px 14px 0 14px;
-        margin: 0;
-        border: 1px solid #CBD5E1;
-        border-bottom: 0;
-        border-radius: 16px 16px 0 0;
-        background: #E8EEF6;
-        box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.02);
+    div[data-testid="stTabs"] [role="tablist"],
+    div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+        display: flex !important;
+        gap: 8px !important;
+        align-items: flex-end !important;
+        padding: 12px 14px 0 14px !important;
+        margin: 0 !important;
+        border: 1px solid #CBD5E1 !important;
+        border-bottom: 0 !important;
+        border-radius: 16px 16px 0 0 !important;
+        background-color: #E8EEF6 !important;
+        box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.02) !important;
+        overflow: visible !important;
     }
 
-    /* 모든 인덱스 탭 */
-    div[data-testid="stTabs"] button[role="tab"],
-    div[data-testid="stTabs"] button[data-baseweb="tab"] {
-        position: relative;
-        z-index: 1;
-        flex: 0 0 auto;
-        min-height: 52px;
-        padding: 11px 26px;
-        margin: 0;
+    /* 모든 파일철 인덱스 탭 */
+    div[data-testid="stTabs"] [role="tab"],
+    div[data-testid="stTabs"] [data-baseweb="tab"] {
+        position: relative !important;
+        z-index: 1 !important;
+        flex: 0 0 auto !important;
+        min-height: 52px !important;
+        padding: 11px 26px !important;
+        margin: 0 !important;
         border: 1px solid #B8C4D4 !important;
         border-bottom: 1px solid #9AAAC0 !important;
         border-radius: 12px 12px 0 0 !important;
-        background: #D7E0EC !important;
+        background-color: #D7E0EC !important;
         color: #475569 !important;
         font-size: 1.05rem !important;
         font-weight: 700 !important;
-        box-shadow: inset 0 -2px 3px rgba(15, 23, 42, 0.04);
-        transform: none;
+        box-shadow: inset 0 -2px 3px rgba(15, 23, 42, 0.04) !important;
+        transform: none !important;
         transition:
-            background 0.15s ease,
+            background-color 0.15s ease,
             color 0.15s ease,
-            transform 0.15s ease;
+            transform 0.15s ease !important;
     }
 
-    /* 탭 내부 글자 */
-    div[data-testid="stTabs"] button[role="tab"] p,
-    div[data-testid="stTabs"] button[data-baseweb="tab"] p {
+    /* 탭 내부 글자와 아이콘 */
+    div[data-testid="stTabs"] [role="tab"] *,
+    div[data-testid="stTabs"] [data-baseweb="tab"] * {
         margin: 0 !important;
         padding: 0 !important;
         color: inherit !important;
         font-size: 1.05rem !important;
         font-weight: 700 !important;
-        white-space: nowrap;
+        white-space: nowrap !important;
     }
 
     /* 마우스를 올린 탭 */
-    div[data-testid="stTabs"] button[role="tab"]:hover,
-    div[data-testid="stTabs"] button[data-baseweb="tab"]:hover {
-        background: #E2E8F0 !important;
+    div[data-testid="stTabs"] [role="tab"]:hover,
+    div[data-testid="stTabs"] [data-baseweb="tab"]:hover {
+        background-color: #E2E8F0 !important;
         color: #1E3A8A !important;
-        transform: translateY(-2px);
+        transform: translateY(-2px) !important;
     }
 
-    /* 선택된 인덱스 탭 */
-    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"],
-    div[data-testid="stTabs"]
-    button[data-baseweb="tab"][aria-selected="true"] {
-        z-index: 5;
-        margin-bottom: -1px;
+    /* 선택된 파일철 인덱스 탭 */
+    div[data-testid="stTabs"] [role="tab"][aria-selected="true"],
+    div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
+        z-index: 5 !important;
+        margin-bottom: -1px !important;
         border-color: #94A3B8 !important;
         border-bottom-color: #FFFFFF !important;
-        background: #FFFFFF !important;
+        background-color: #FFFFFF !important;
         color: #1D4ED8 !important;
-        box-shadow: 0 -3px 8px rgba(15, 23, 42, 0.09);
-        transform: translateY(-3px);
+        box-shadow: 0 -3px 8px rgba(15, 23, 42, 0.09) !important;
+        transform: translateY(-3px) !important;
     }
 
-    /* 선택된 탭 글자 */
-    div[data-testid="stTabs"]
-    button[role="tab"][aria-selected="true"] p,
-    div[data-testid="stTabs"]
-    button[data-baseweb="tab"][aria-selected="true"] p {
+    /* 선택된 탭 내부 글자와 아이콘 */
+    div[data-testid="stTabs"] [role="tab"][aria-selected="true"] *,
+    div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] * {
         color: #1D4ED8 !important;
         font-weight: 800 !important;
     }
 
-    /* Streamlit 기본 탭 선택선 제거 */
-    div[data-testid="stTabs"] div[data-baseweb="tab-highlight"],
+    /* Streamlit 기본 선택선 제거 */
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
     div[data-testid="stTabs"] [data-testid="stTabsTabHighlight"] {
         display: none !important;
     }
 
     /* 탭 아래 본문: 흰색 노트 페이지 */
-    div[data-testid="stTabs"] div[role="tabpanel"],
-    div[data-testid="stTabs"] div[data-baseweb="tab-panel"] {
-        position: relative;
-        z-index: 2;
-        min-height: 120px;
-        padding: 22px 20px 26px 20px;
-        margin-top: 0;
-        border: 1px solid #94A3B8;
-        border-radius: 0 14px 14px 14px;
-        background: #FFFFFF;
-        box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+    div[data-testid="stTabs"] [role="tabpanel"],
+    div[data-testid="stTabs"] [data-baseweb="tab-panel"] {
+        position: relative !important;
+        z-index: 2 !important;
+        min-height: 120px !important;
+        padding: 22px 20px 26px 20px !important;
+        margin-top: 0 !important;
+        border: 1px solid #94A3B8 !important;
+        border-radius: 0 14px 14px 14px !important;
+        background-color: #FFFFFF !important;
+        box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08) !important;
     }
 
     /* 작은 화면 대응 */
     @media (max-width: 768px) {
-        div[data-testid="stTabs"] div[role="tablist"],
-        div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
-            gap: 5px;
-            padding-left: 8px;
-            padding-right: 8px;
-            overflow-x: auto;
+        div[data-testid="stTabs"] [role="tablist"],
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 5px !important;
+            padding-left: 8px !important;
+            padding-right: 8px !important;
+            overflow-x: auto !important;
+            overflow-y: visible !important;
         }
 
-        div[data-testid="stTabs"] button[role="tab"],
-        div[data-testid="stTabs"] button[data-baseweb="tab"] {
-            min-height: 46px;
-            padding: 9px 15px;
+        div[data-testid="stTabs"] [role="tab"],
+        div[data-testid="stTabs"] [data-baseweb="tab"] {
+            min-height: 46px !important;
+            padding: 9px 15px !important;
         }
 
-        div[data-testid="stTabs"] button[role="tab"] p,
-        div[data-testid="stTabs"] button[data-baseweb="tab"] p {
+        div[data-testid="stTabs"] [role="tab"] *,
+        div[data-testid="stTabs"] [data-baseweb="tab"] * {
             font-size: 0.92rem !important;
         }
 
-        div[data-testid="stTabs"] div[role="tabpanel"],
-        div[data-testid="stTabs"] div[data-baseweb="tab-panel"] {
-            padding: 16px 10px 20px 10px;
+        div[data-testid="stTabs"] [role="tabpanel"],
+        div[data-testid="stTabs"] [data-baseweb="tab-panel"] {
+            padding: 16px 10px 20px 10px !important;
         }
     }
 

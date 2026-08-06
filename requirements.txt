@@ -1,9 +1,10 @@
-streamlit
+streamlit==1.60.0
+streamlit-folium==0.27.2
+folium
 pandas
 numpy
-geopandas
-folium
-streamlit-folium
+pyarrow
+geopandas==1.1.4
 plotly
 scikit-learn
-pyarrow
+openai

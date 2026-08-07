@@ -33,7 +33,7 @@ st.set_page_config(
 # Streamlit 기본 제목 방식 사용
 # -----------------------------------
 st.title("🗺️ Traffic Atlas AI")
-st.caption("대전 교통사고 공간분석·AI 의사결정 지원시스템")
+st.caption("대전경찰 교통사고 공간분석 및 AI 의사결정 지원시스템")
 
 # ============================================================
 # 공통 UI 디자인
@@ -90,10 +90,10 @@ st.markdown(
         background-color: #EFF6FF;
     }
 
-    /* ==========================================
-       KPI 아래 현재 검색조건
-       박스 없이 작은 보조 텍스트로 표시
-       ========================================== */
+/* ==========================================
+   KPI 아래 현재 검색조건
+   박스 없이 작은 보조 텍스트로 표시
+   ========================================== */
     .search-condition-text {
         display: flex;
         align-items: center;
@@ -1226,58 +1226,54 @@ JSON에 없는 기관별 관할이나 사업을 임의로 단정하지 않는다
     elif report_type == "police_report":
         task_prompt = """
 [분석 목적]
-현재 필터 조건의 교통사고 현황을 대한민국 경찰 내부 보고에 활용할 수 있는
-정형화된 분석보고서 형태로 작성한다.
-탐색 과정 자체보다 핵심 현황, 문제점, 관리대상, 조치방향이 한눈에 보이게 한다.
+현재 필터 조건의 교통사고 분석결과를 경찰 내부 검토·지휘보고에 바로 활용할 수 있는
+정형화된 개조식 보고서로 작성한다. 핵심 현황과 문제점을 선명하게 제시하고,
+분석결과가 실제 교통경찰 활동과 후속 조치로 연결되도록 한다.
 
 [출력 형식]
 # 교통사고 분석 및 대응방향 보고
 
-## 1. 분석 개요
-- 분석 대상과 기간
-- 적용된 주요 조건
-- 총 사고, 사망사고, 중상사고, 사망자 규모
+ㅁ 현황 및 문제점
+  ㅇ 분석 대상·기간·주요 필터와 총 사고, 사망사고, 중상사고 규모를 먼저 제시
+  ㅇ 사고종별·시간대·요일·법규위반·가해 및 피해차종 중 보고 가치가 높은 특징만 선별
+  ㅇ 사고다발지점은 주소, 반경 내 사고건수, 중대사고 규모와 두드러진 유형을 함께 제시
+  ㅇ 각 항목은 반드시 '통계적 현황 → 경찰 관리상 문제점' 순으로 연결
+  ㅇ 단순히 건수가 많다는 사실과 중대사고 비율이 높다는 사실을 구분
 
-개조식만 나열하지 말고 짧은 보고문장으로 정리한다.
+ㅁ 추진 방안
+  ㅇ 교통경력 배치
+    - 사고 집중 시간대·요일·사고다발지점을 근거로 우선 배치 장소와 시간대를 제시
+    - 자료상 특정이 곤란하면 현장 확인 후 탄력 배치하도록 표현
+  ㅇ 순찰동선 운영
+    - 사고다발지점과 인접 관리지점을 연결하는 가시적·반복적 순찰 방향을 제시
+    - 실제 도로 연결관계가 JSON에 없으므로 구체적 도로명이나 이동경로는 임의 생성하지 않음
+  ㅇ 단속활동
+    - 주요 법규위반, 사고종별, 가해차종과 집중 시간대를 연계하여 단속 대상을 구체화
+    - 단속 필요성이 통계만으로 확정되지 않으면 현장 관찰 및 위반실태 확인 후 시행하도록 기재
+  ㅇ 맞춤형 교육·홍보활동
+    - 피해유형·연령대·차종·시간대에 맞는 대상과 행동수칙 중심의 메시지를 제안
+    - 막연한 캠페인 확대가 아니라 대상, 장소, 시기, 전달내용을 가능한 범위에서 구체화
+  ㅇ 시설개선 필요부분 검토
+    - 사고다발지점별 현장점검 사항을 먼저 제시하고 점검결과에 따라 검토할 개선방향을 구분
+    - 신호운영, 횡단시설, 조명, 시야, 노면표시, 안전표지 등은 현장 확인 전 사실처럼 단정하지 않음
+  ㅇ 관계기관 협업이 필요한 경우 지자체·도로관리청 등과 공동점검 또는 자료공유 과제로 제시
 
-## 2. 주요 사고현황
-사고분류·사고종별·시간대·요일·법규위반·차종 중
-보고 가치가 높은 항목만 선별하여 현황을 정리한다.
-단순 순위와 중대사고 비율을 구분한다.
+ㅁ 향후 계획
+  ㅇ 즉시 시행 가능한 교통관리·순찰·단속·홍보 과제를 제시
+  ㅇ 사고다발지점 현장점검과 관계기관 협의가 필요한 과제를 구분
+  ㅇ 일정 기간 시행 후 사고건수뿐 아니라 경력 배치, 순찰, 단속, 교육·홍보, 시설점검 등
+     측정 가능한 관리지표로 효과를 점검하고 필요 시 대책을 보완하도록 작성
 
-## 3. 주요 특징 및 문제점
-핵심 특징 3~5개를 다음 형식으로 작성한다.
-
-### 가. 제목
-근거 수치를 포함한 1~2개 문단으로 작성하고,
-왜 경찰 관리상 중요한지를 연결한다.
-
-### 나. 제목
-같은 방식으로 작성한다.
-
-## 4. 사고다발지점 관리 필요성
-사고다발지점의 공통점과 지점별 차이를 요약하고,
-우선 현장점검이 필요한 지점을 데이터 근거와 함께 제시한다.
-도로구조 등 미확인 사항은 단정하지 않는다.
-
-## 5. 향후 대응방향
-- 단속·교통관리
-- 교육·홍보
-- 현장점검 및 시설개선 검토
-- 관계기관 협업
-
-각 항목은 데이터 근거와 실행방향이 이어지도록 작성한다.
-
-## 6. 종합 의견
-관리자가 기억해야 할 핵심 판단과 우선 조치를 1~2개 문단으로 정리한다.
-
-## 7. 분석상 한계
-JSON의 analysis_limitations를 반영해 간결하게 작성한다.
-
-[작성 유의사항]
-- 공문서에 가까운 간결한 표현을 사용하되 지나친 명사 나열은 피한다.
-- '강화할 필요가 있다'만 반복하지 말고 대상·시간·장소·방법을 가능한 범위에서 구체화한다.
-- 별도의 결재선, 시행일자, 문서번호, 수신처는 만들지 않는다.
+[문체 및 작성 규칙]
+1. 본문은 반드시 'ㅁ'과 'ㅇ'을 사용한 개조식으로 작성하고 장문의 서술형 문단은 사용하지 않는다.
+2. 각 문장은 경찰 내부 보고서에 맞게 간결하게 작성하며, 원칙적으로 한 항목당 1~2문장으로 제한한다.
+3. 수치가 있는 판단에는 관련 건수 또는 비율을 정확히 병기한다.
+4. 같은 통계를 여러 항목에서 반복하지 않는다.
+5. '강화 필요', '적극 추진' 같은 추상적 표현만 쓰지 말고 대상·시간·장소·방법을 구체화한다.
+6. JSON에 없는 도로명, 교차로 형태, 교통량, 신호체계, 시설상태, 사고원인은 만들지 않는다.
+7. 시설개선은 확정안이 아니라 '현장점검 후 검토' 방식으로 작성한다.
+8. 분석상 한계는 별도 단락을 만들지 말고 관련 항목 말미에 필요한 범위에서 간단히 반영한다.
+9. 별도의 결재선, 문서번호, 수신처, 시행일자는 만들지 않는다.
 """.strip()
 
     else:
@@ -2178,91 +2174,73 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ============================================================
-# 페이지 탭
-# ============================================================
-map_tab, stats_tab, ai_tab = st.tabs(
-    [
-        "🗺️ GIS 분석",
-        "📊 통계 대시보드",
-        "🤖 AI 리포트",
-    ]
-)
 
-with map_tab:
-    st.subheader("🗺️ 교통사고 공간분석", anchor=False)
+if "hotspot_radius" not in st.session_state:
+    st.session_state.hotspot_radius = 100
 
-    # -----------------------------------
-    # 지도 위 사고다발지점 표시 설정
-    # 입력값은 적용 버튼을 눌렀을 때만 지도에 반영
-    # 기본값: 반경 100m / 상위 5개
-    # -----------------------------------
-    if "hotspot_radius" not in st.session_state:
-        st.session_state.hotspot_radius = 100
+if "hotspot_top_n" not in st.session_state:
+    st.session_state.hotspot_top_n = 5
 
-    if "hotspot_top_n" not in st.session_state:
-        st.session_state.hotspot_top_n = 5
+st.markdown("입력한 반경(m)과 수에 따라, AI가 사고다발지역을 자동 탐색합니다.")
 
-    st.markdown("입력한 반경(m)과 수에 따라, AI가 사고다발지역을 자동 탐색합니다.")
+with st.form("hotspot_settings_form"):
+    hotspot_col1, hotspot_col2, hotspot_col3 = st.columns(
+        [1, 1, 0.7]
+    )
 
-    with st.form("hotspot_settings_form"):
-        hotspot_col1, hotspot_col2, hotspot_col3 = st.columns(
-            [1, 1, 0.7]
+    with hotspot_col1:
+        radius_input = st.number_input(
+            "분석 반경 (m)",
+            min_value=50,
+            max_value=300,
+            value=int(st.session_state.hotspot_radius),
+            step=10,
+            format="%d",
         )
 
-        with hotspot_col1:
-            radius_input = st.number_input(
-                "분석 반경 (m)",
-                min_value=50,
-                max_value=300,
-                value=int(st.session_state.hotspot_radius),
-                step=10,
-                format="%d",
-            )
+    with hotspot_col2:
+        top_n_input = st.number_input(
+            "사고다발지역 수",
+            min_value=1,
+            max_value=10,
+            value=int(st.session_state.hotspot_top_n),
+            step=1,
+            format="%d",
+        )
 
-        with hotspot_col2:
-            top_n_input = st.number_input(
-                "사고다발지역 수",
-                min_value=1,
-                max_value=10,
-                value=int(st.session_state.hotspot_top_n),
-                step=1,
-                format="%d",
-            )
+    with hotspot_col3:
+        # 입력창과 버튼의 세로 위치 맞춤
+        st.write("")
+        st.write("")
 
-        with hotspot_col3:
-            # 입력창과 버튼의 세로 위치 맞춤
-            st.write("")
-            st.write("")
+        hotspot_apply = st.form_submit_button(
+            "설정 적용",
+            use_container_width=True,
+        )
 
-            hotspot_apply = st.form_submit_button(
-                "설정 적용",
-                use_container_width=True,
-            )
+# 적용 버튼을 눌렀을 때만 실제 설정값 변경
+if hotspot_apply:
+    st.session_state.hotspot_radius = int(radius_input)
+    st.session_state.hotspot_top_n = int(top_n_input)
 
-    # 적용 버튼을 눌렀을 때만 실제 설정값 변경
-    if hotspot_apply:
-        st.session_state.hotspot_radius = int(radius_input)
-        st.session_state.hotspot_top_n = int(top_n_input)
+hotspot_radius = st.session_state.hotspot_radius
+hotspot_top_n = st.session_state.hotspot_top_n
 
-    hotspot_radius = st.session_state.hotspot_radius
-    hotspot_top_n = st.session_state.hotspot_top_n
-
-    st.markdown(
-        """
-        <div style="
-            text-align: right;
-            color: #6B7280;
-            font-size: 0.82rem;
-            margin-top: 2px;
-            margin-bottom: 8px;
-        ">
-            레이어 선택창에서 사고다발지점·사망사고·히트맵·관할 경계를
-            개별적으로 켜고 끌 수 있습니다.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+st.markdown(
+    """
+    <div style="
+        text-align: right;
+        color: #6B7280;
+        font-size: 0.82rem;
+        margin-top: 2px;
+        margin-bottom: 8px;
+    ">
+        레이어 선택창에서 사고다발지점·사망사고·히트맵·관할 경계를
+        개별적으로 켜고 끌 수 있습니다.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # -----------------------------------
@@ -2284,7 +2262,25 @@ folium.TileLayer(
 ).add_to(m2)
 
 # -----------------------------------
-# 지도 레이어 생성
+# 지도 레이어 생성# ============================================================
+# 페이지 탭
+# ============================================================
+map_tab, stats_tab, ai_tab = st.tabs(
+    [
+        "🗺️ GIS 분석",
+        "📊 통계 대시보드",
+        "🤖 AI 리포트",
+    ]
+)
+
+with map_tab:
+    st.subheader("🗺️ 교통사고 공간분석", anchor=False)
+
+    # -----------------------------------
+    # 지도 위 사고다발지점 표시 설정
+    # 입력값은 적용 버튼을 눌렀을 때만 지도에 반영
+    # 기본값: 반경 100m / 상위 5개
+    # -------------
 # 아래에서는 레이어에 객체만 담고,
 # 실제 지도 추가는 마지막에 원하는 범례 순서대로 처리
 # -----------------------------------
@@ -2851,6 +2847,7 @@ folium.LayerControl(
 st.markdown(
     """
     <style>
+
     /* =====================================================
        메인 화면 여백
        ===================================================== */
@@ -2875,7 +2872,8 @@ st.markdown(
         font-size: 0.88rem;
     }
 
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    div[data-testid="stMetric"]
+    [data-testid="stMetricValue"] {
         color: #0F172A;
         font-weight: 700;
     }
@@ -2896,13 +2894,19 @@ st.markdown(
         display: flex !important;
         gap: 8px !important;
         align-items: flex-end !important;
+
         padding: 12px 14px 0 14px !important;
         margin: 0 !important;
+
         border: 1px solid #CBD5E1 !important;
         border-bottom: 0 !important;
         border-radius: 16px 16px 0 0 !important;
+
         background-color: #E8EEF6 !important;
-        box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.02) !important;
+
+        box-shadow:
+            0 -1px 0 rgba(15, 23, 42, 0.02) !important;
+
         overflow: visible !important;
     }
 
@@ -2911,19 +2915,28 @@ st.markdown(
     div[data-testid="stTabs"] [data-baseweb="tab"] {
         position: relative !important;
         z-index: 1 !important;
+
         flex: 0 0 auto !important;
         min-height: 52px !important;
+
         padding: 11px 26px !important;
         margin: 0 !important;
+
         border: 1px solid #B8C4D4 !important;
         border-bottom: 1px solid #9AAAC0 !important;
         border-radius: 12px 12px 0 0 !important;
+
         background-color: #D7E0EC !important;
         color: #475569 !important;
+
         font-size: 1.05rem !important;
         font-weight: 700 !important;
-        box-shadow: inset 0 -2px 3px rgba(15, 23, 42, 0.04) !important;
+
+        box-shadow:
+            inset 0 -2px 3px rgba(15, 23, 42, 0.04) !important;
+
         transform: none !important;
+
         transition:
             background-color 0.15s ease,
             color 0.15s ease,
@@ -2935,9 +2948,11 @@ st.markdown(
     div[data-testid="stTabs"] [data-baseweb="tab"] * {
         margin: 0 !important;
         padding: 0 !important;
+
         color: inherit !important;
         font-size: 1.05rem !important;
         font-weight: 700 !important;
+
         white-space: nowrap !important;
     }
 
@@ -2950,52 +2965,77 @@ st.markdown(
     }
 
     /* 선택된 파일철 인덱스 탭 */
-    div[data-testid="stTabs"] [role="tab"][aria-selected="true"],
-    div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
+    div[data-testid="stTabs"]
+    [role="tab"][aria-selected="true"],
+    div[data-testid="stTabs"]
+    [data-baseweb="tab"][aria-selected="true"] {
         z-index: 5 !important;
+
         margin-bottom: -1px !important;
+
         border-color: #94A3B8 !important;
         border-bottom-color: #FFFFFF !important;
+
         background-color: #FFFFFF !important;
         color: #1D4ED8 !important;
-        box-shadow: 0 -3px 8px rgba(15, 23, 42, 0.09) !important;
+
+        box-shadow:
+            0 -3px 8px rgba(15, 23, 42, 0.09) !important;
+
         transform: translateY(-3px) !important;
     }
 
     /* 선택된 탭 내부 글자와 아이콘 */
-    div[data-testid="stTabs"] [role="tab"][aria-selected="true"] *,
-    div[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] * {
+    div[data-testid="stTabs"]
+    [role="tab"][aria-selected="true"] *,
+    div[data-testid="stTabs"]
+    [data-baseweb="tab"][aria-selected="true"] * {
         color: #1D4ED8 !important;
         font-weight: 800 !important;
     }
 
-    /* Streamlit 기본 선택선 제거 */
-    div[data-testid="stTabs"] [data-baseweb="tab-highlight"],
-    div[data-testid="stTabs"] [data-testid="stTabsTabHighlight"] {
+    /* Streamlit 기본 선택 밑줄 제거 */
+    div[data-testid="stTabs"]
+    [data-baseweb="tab-highlight"],
+    div[data-testid="stTabs"]
+    [data-testid="stTabsTabHighlight"] {
         display: none !important;
     }
 
-    /* 탭 아래 본문: 흰색 노트 페이지 */
+    /* =====================================================
+       탭 아래 본문: 흰색 노트 페이지
+       ===================================================== */
     div[data-testid="stTabs"] [role="tabpanel"],
     div[data-testid="stTabs"] [data-baseweb="tab-panel"] {
         position: relative !important;
         z-index: 2 !important;
+
         min-height: 120px !important;
+
         padding: 22px 20px 26px 20px !important;
         margin-top: 0 !important;
+
         border: 1px solid #94A3B8 !important;
         border-radius: 0 14px 14px 14px !important;
+
         background-color: #FFFFFF !important;
-        box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08) !important;
+
+        box-shadow:
+            0 5px 16px rgba(15, 23, 42, 0.08) !important;
     }
 
-    /* 작은 화면 대응 */
+    /* =====================================================
+       작은 화면 대응
+       ===================================================== */
     @media (max-width: 768px) {
+
         div[data-testid="stTabs"] [role="tablist"],
         div[data-testid="stTabs"] [data-baseweb="tab-list"] {
             gap: 5px !important;
+
             padding-left: 8px !important;
             padding-right: 8px !important;
+
             overflow-x: auto !important;
             overflow-y: visible !important;
         }
@@ -3017,7 +3057,9 @@ st.markdown(
         }
     }
 
-    /* 접기 영역 */
+    /* =====================================================
+       접기 영역
+       ===================================================== */
     div[data-testid="stExpander"] {
         border: 1px solid #E2E8F0;
         border-radius: 12px;
@@ -3025,6 +3067,7 @@ st.markdown(
         margin-bottom: 0.75rem;
         background-color: #FFFFFF;
     }
+
     </style>
     """,
     unsafe_allow_html=True,

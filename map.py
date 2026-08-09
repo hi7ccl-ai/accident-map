@@ -175,7 +175,7 @@ st.markdown(
 # 사고 데이터 불러오기 (Parquet 파일 로드 & 캐싱)
 @st.cache_data
 def load_data():
-    df = pd.read_parquet("(최종)정제완료(21~26).parquet")
+    df = pd.read_parquet("정제완료(21~25).parquet")
 
     # [명칭 변경] 가해/피해차량 차종 명칭 치환 처리
     for col in ["wrngdo_vhcle_asort_dc", "dmge_vhcle_asort_dc"]:
@@ -2174,7 +2174,7 @@ st.sidebar.markdown(
     "
     >
         ※ 22시~06시와 같이 자정을 포함한 검색 가능
-        ※ '분'을 제거한 '시간'으로 검색 / ex) 07시15분 → 07시에 포함
+        ※ '분'을 제거한 시간으로 검색 / 07시15분 → 07시에 포함
     </div>
     """,
     unsafe_allow_html=True,

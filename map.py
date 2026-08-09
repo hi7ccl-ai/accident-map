@@ -173,23 +173,11 @@ st.markdown(
 
 
 # 사고 데이터 불러오기 (Parquet 파일 로드 & 캐싱)
+# - 원본 데이터 정제와 category 변환은 Parquet 저장 전에 완료
+# - Streamlit에서는 재치환하지 않고 필요한 파생 컬럼만 생성
 @st.cache_data
 def load_data():
     df = pd.read_parquet("정제완료(21~25).parquet")
-
-    # [명칭 변경] 가해/피해차량 차종 명칭 치환 처리
-    for col in ["wrngdo_vhcle_asort_dc", "dmge_vhcle_asort_dc"]:
-        if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace("개인형이동수단(PM)", "PM", regex=False)
-            )
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace("사륜오토바이(ATV)", "ATV", regex=False)
-            )
 
     # 시간대 필터링용 정수형 변환
     if "occrrnc_time_dc" in df.columns:
@@ -2040,6 +2028,10 @@ year_month_options = (
 
 sidebar_filter_title("발생연월", margin_bottom=14)
 
+# 데이터가 비어 있거나 날짜 변환에 실패해도 이후 코드에서 안전하게 참조
+start_year_month = None
+end_year_month = None
+
 if year_month_options:
     start_year_month, end_year_month = (
         st.sidebar.select_slider(
@@ -3692,7 +3684,7 @@ with ai_tab:
 
     st.markdown(
         """
-        현재 지도에 적용된 조건을 기준으로 AI 분석을 수행하고합니다.  
+        현재 지도에 적용된 조건을 기준으로 AI 분석을 수행합니다.  
         """
     )
 
@@ -3812,7 +3804,7 @@ with ai_tab:
             "title": "🎯 맞춤형 교통안전 대응전략",
             "description": (
                 "데이터상 위험요소를 세부적으로 검토하고 "
-                "실제 경찰활동과 연계할 전략을 발굴합니다.."
+                "실제 경찰활동과 연계할 전략을 발굴합니다."
             ),
             "spinner": (
                 "교통사고 패턴을 대응과제로 전환하고 참고할 전문자료 등을 검토하고 있습니다."
@@ -3823,7 +3815,7 @@ with ai_tab:
             "title": "📄 교통사고 분석 및 대응방향 보고",
             "description": (
                 "검색된 통계자료를 외부 전문자료 등과 비교분석해 "
-                "실무용으로 활용할 수 있는 보고서를 작성합니다.."
+                "실무용으로 활용할 수 있는 보고서를 작성합니다."
             ),
             "spinner": (
                 "필터링된 통계를 분석해 경찰 형식의 AI 보고서를 작성하고 있습니다."
@@ -4587,8 +4579,11 @@ with stats_tab:
                     .sort_values("사고건수", ascending=False)
                 )
 
+                # 그래프 표시용 라벨만 문자열로 변환
+                # Parquet category 컬럼에 새 범주를 직접 넣지 않아 Cloud 오류 방지
                 wrngdo_counts["차종"] = (
                     wrngdo_counts["차종"]
+                    .astype("string")
                     .replace({"기타불명": "기타"})
                 )
 
@@ -4664,8 +4659,11 @@ with stats_tab:
                     .sort_values("사고건수", ascending=False)
                 )
 
+                # 그래프 표시용 라벨만 문자열로 변환
+                # category에 새 범주를 직접 추가하지 않음
                 dmge_counts["차종"] = (
                     dmge_counts["차종"]
+                    .astype("string")
                     .replace({"기타불명": "기타"})
                 )
 
@@ -4736,8 +4734,11 @@ with stats_tab:
                     .sort_values("사망사고 건수", ascending=False)
                 )
 
+                # 그래프 표시용 라벨만 문자열로 변환
+                # category에 새 범주를 직접 추가하지 않음
                 fatal_type_counts["사망자 유형"] = (
                     fatal_type_counts["사망자 유형"]
+                    .astype("string")
                     .replace({"기타불명": "기타"})
                 )
 

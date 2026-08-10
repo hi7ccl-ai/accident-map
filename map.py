@@ -1665,7 +1665,7 @@ def generate_ai_report(analysis_package, report_type):
     - 핵심 인사이트: Terra / medium / 웹검색 없음
     - 다발지점 진단: Terra / medium / 웹검색 없음
     - 대응전략: Terra / high / 필요 시 웹검색
-    - AI 보고서: Sol / high / 필요 시 웹검색
+    - AI 보고서: Terra / high / 필요 시 웹검색
     """
     if OpenAI is None:
         raise RuntimeError(
@@ -1681,38 +1681,20 @@ def generate_ai_report(analysis_package, report_type):
         ) from exc
 
     report_configs = {
-        # --------------------------------------------------------
-        # 1. 핵심 인사이트
-        # - Python에서 대부분의 통계 계산이 완료된 상태이므로
-        #   비교·해석·문장화 중심
-        # - 비용 절감을 위해 Luna 사용
-        # --------------------------------------------------------
         "insight": {
-            "model": "gpt-5.6-luna",
+            "model": "gpt-5.6-terra",
             "reasoning_effort": "medium",
             "web_search": False,
             "max_output_tokens": 12000,
             "secret_key": "OPENAI_MODEL_INSIGHT",
         },
-
-        # --------------------------------------------------------
-        # 2. 사고다발지점 진단
-        # - 정형화된 hotspot 통계를 기반으로 지점별 특징 비교
-        # - 비용 절감을 위해 Luna 사용
-        # --------------------------------------------------------
         "hotspot": {
-            "model": "gpt-5.6-luna",
+            "model": "gpt-5.6-terra",
             "reasoning_effort": "medium",
             "web_search": False,
             "max_output_tokens": 12000,
             "secret_key": "OPENAI_MODEL_HOTSPOT",
         },
-
-        # --------------------------------------------------------
-        # 3. 맞춤형 대응전략
-        # - 통계 → 위험판단 → 경찰활동으로 연결하는 추론이 중요
-        # - Web Search도 사용하므로 Terra 유지
-        # --------------------------------------------------------
         "strategy": {
             "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
@@ -1720,13 +1702,6 @@ def generate_ai_report(analysis_package, report_type):
             "max_output_tokens": 18000,
             "secret_key": "OPENAI_MODEL_STRATEGY",
         },
-
-        # --------------------------------------------------------
-        # 4. 경찰 형식 AI 보고서
-        # - 기존 Sol에서 Terra로 하향
-        # - File Search + Web Search + 보고서 작성 품질을 고려해
-        #   Luna까지 내리지 않고 Terra 유지
-        # --------------------------------------------------------
         "police_report": {
             "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
@@ -1741,13 +1716,7 @@ def generate_ai_report(analysis_package, report_type):
 
     config = report_configs[report_type].copy()
 
-    try:
-        model_name = st.secrets.get(
-            config["secret_key"],
-            config["model"],
-        )
-    except Exception:
-        model_name = config["model"]
+    model_name = config["model"]
 
     client = OpenAI(api_key=api_key)
 
@@ -3866,7 +3835,7 @@ with ai_tab:
         },
     }
 
-    # ============================================================
+     # ============================================================
     # AI 보고서 선택 및 생성
     #
     # 동작 방식
@@ -3991,7 +3960,6 @@ with ai_tab:
             st.code(
                 f"{type(error).__name__}: {error}"
             )
-
     # ------------------------------------------------------------
     # 생성된 AI 결과 표시
     # ------------------------------------------------------------
@@ -4089,10 +4057,6 @@ with ai_tab:
             ai_display_text = st.session_state[
                 f"ai_result_{selected_ai_report_type}"
             ]
-
-            # Markdown의 ~~문법이 취소선으로 해석되는 것을 방지
-            # 시간범위 표현을 고려하여 ~~ → ~ 로 변환
-            ai_display_text = ai_display_text.replace("~~", "~")
 
             st.markdown(ai_display_text)
 

@@ -1229,6 +1229,8 @@ reference_populations는 선택집단의 특이성을 판단하기 위한 동일
 12. 의미 있는 판단이 적으면 억지로 개수를 채우지 않는다.
 13. 답변에는 Markdown 취소선 문법(~~텍스트~~)이나 수정 전·후 표현을 남기지 않는다.
 14. 문장을 수정할 필요가 있으면 최종적으로 확정된 문장만 출력한다.
+15. 본문의 세부 설명·근거·실행사항 등을 나열할 때는 각 항목 앞에 하이픈(-)을 사용한다.
+16. 하위 항목을 다시 원형 또는 중첩 bullet 목록으로 만들지 않는다.
 
 
 [외부자료 사용]
@@ -1237,16 +1239,16 @@ reference_populations는 선택집단의 특이성을 판단하기 위한 동일
 
     if web_enabled:
         common_rules += """
-15. 외부자료는 내부 통계의 숫자를 보충하거나 변경하기 위해 사용하지 않는다.
-16. 사고특성의 일반적 설명, 효과적인 개입수단, 연구결과, 타 기관 사례를 검증할 필요가 있을 때만 웹검색을 사용한다.
-17. 검색 시 경찰청, 한국도로교통공단, 국토교통부, 한국교통안전공단, 정부·지자체, 공공연구기관, 학술논문 등 신뢰도 높은 1차·공식 자료를 우선한다.
-18. 외부연구에서 확인된 일반적 위험요인과 현재 대전 데이터에서 직접 확인된 사실을 명확히 구분한다.
-19. 외부자료를 실제로 사용한 문장에는 출처가 드러나도록 인용을 유지하고, 존재하지 않는 기관·연구·사례를 만들지 않는다.
+16. 외부자료는 내부 통계의 숫자를 보충하거나 변경하기 위해 사용하지 않는다.
+17. 사고특성의 일반적 설명, 효과적인 개입수단, 연구결과, 타 기관 사례를 검증할 필요가 있을 때만 웹검색을 사용한다.
+18. 검색 시 경찰청, 한국도로교통공단, 국토교통부, 한국교통안전공단, 정부·지자체, 공공연구기관, 학술논문 등 신뢰도 높은 1차·공식 자료를 우선한다.
+19. 외부연구에서 확인된 일반적 위험요인과 현재 대전 데이터에서 직접 확인된 사실을 명확히 구분한다.
+20. 외부자료를 실제로 사용한 문장에는 출처가 드러나도록 인용을 유지하고, 존재하지 않는 기관·연구·사례를 만들지 않는다.
 """
     else:
         common_rules += """
-20. 이번 분석에서는 외부사례나 연구를 사실처럼 인용하지 않는다. JSON과 일반적인 분석 논리에 집중한다.
-21. 데이터에 없는 원인 설명이 필요하면 '가능한 설명이지만 현재 자료로 확인할 수 없음'이라고 한계를 표시한다.
+21. 이번 분석에서는 외부사례나 연구를 사실처럼 인용하지 않는다. JSON과 일반적인 분석 논리에 집중한다.
+22. 데이터에 없는 원인 설명이 필요하면 '가능한 설명이지만 현재 자료로 확인할 수 없음'이라고 한계를 표시한다.
 """
 
     if report_type == "insight":
@@ -1679,20 +1681,38 @@ def generate_ai_report(analysis_package, report_type):
         ) from exc
 
     report_configs = {
+        # --------------------------------------------------------
+        # 1. 핵심 인사이트
+        # - Python에서 대부분의 통계 계산이 완료된 상태이므로
+        #   비교·해석·문장화 중심
+        # - 비용 절감을 위해 Luna 사용
+        # --------------------------------------------------------
         "insight": {
-            "model": "gpt-5.6-terra",
+            "model": "gpt-5.6-luna",
             "reasoning_effort": "medium",
             "web_search": False,
             "max_output_tokens": 12000,
             "secret_key": "OPENAI_MODEL_INSIGHT",
         },
+
+        # --------------------------------------------------------
+        # 2. 사고다발지점 진단
+        # - 정형화된 hotspot 통계를 기반으로 지점별 특징 비교
+        # - 비용 절감을 위해 Luna 사용
+        # --------------------------------------------------------
         "hotspot": {
-            "model": "gpt-5.6-terra",
+            "model": "gpt-5.6-luna",
             "reasoning_effort": "medium",
             "web_search": False,
             "max_output_tokens": 12000,
             "secret_key": "OPENAI_MODEL_HOTSPOT",
         },
+
+        # --------------------------------------------------------
+        # 3. 맞춤형 대응전략
+        # - 통계 → 위험판단 → 경찰활동으로 연결하는 추론이 중요
+        # - Web Search도 사용하므로 Terra 유지
+        # --------------------------------------------------------
         "strategy": {
             "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
@@ -1700,8 +1720,15 @@ def generate_ai_report(analysis_package, report_type):
             "max_output_tokens": 18000,
             "secret_key": "OPENAI_MODEL_STRATEGY",
         },
+
+        # --------------------------------------------------------
+        # 4. 경찰 형식 AI 보고서
+        # - 기존 Sol에서 Terra로 하향
+        # - File Search + Web Search + 보고서 작성 품질을 고려해
+        #   Luna까지 내리지 않고 Terra 유지
+        # --------------------------------------------------------
         "police_report": {
-            "model": "gpt-5.6",
+            "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
             "web_search": True,
             "max_output_tokens": 22000,
@@ -3839,63 +3866,131 @@ with ai_tab:
         },
     }
 
+    # ============================================================
+    # AI 보고서 선택 및 생성
+    #
+    # 동작 방식
+    # 1. 버튼 클릭 즉시 선택 상태 저장
+    # 2. 생성할 보고서 유형도 pending 상태로 저장
+    # 3. Streamlit 재실행 후 pending 값을 읽어 자동 생성
+    #
+    # → 버튼은 한 번만 클릭
+    # → 선택한 버튼도 즉시 primary 색상으로 변경
+    # → 같은 클릭으로 AI 생성까지 자동 실행
+    # ============================================================
+
+    def queue_ai_report(report_type):
+        """
+        AI 보고서 버튼 클릭 콜백
+
+        - 화면에서 선택된 버튼을 즉시 표시하기 위한 상태
+        - 실제 AI 생성을 위한 대기 상태
+        를 동시에 저장한다.
+        """
+        st.session_state["selected_ai_report_type"] = report_type
+        st.session_state["pending_ai_report_type"] = report_type
+
+
     # ------------------------------------------------------------
-    # 보고서 유형 선택·생성 버튼
+    # 4개 AI 분석 버튼
     # ------------------------------------------------------------
     button_columns = st.columns(4)
-    clicked_report_type = None
 
     for column, (report_type, report_info) in zip(
         button_columns,
         ai_report_types.items(),
     ):
         with column:
-            if st.button(
+
+            st.button(
                 report_info["button"],
                 key=f"generate_ai_{report_type}",
                 type=(
                     "primary"
-                    if st.session_state.get("selected_ai_report_type") == report_type
+                    if st.session_state.get(
+                        "selected_ai_report_type"
+                    ) == report_type
                     else "secondary"
                 ),
                 use_container_width=True,
                 disabled=filtered_df.empty,
-            ):
-                clicked_report_type = report_type
+                on_click=queue_ai_report,
+                args=(report_type,),
+            )
 
             st.caption(report_info["description"])
 
-    if filtered_df.empty:
-        st.warning(
-            "현재 필터 조건에 해당하는 사고 데이터가 없어 AI 분석을 생성할 수 없습니다."
-        )
 
     # ------------------------------------------------------------
-    # 선택한 유형의 AI 결과 생성
+    # 필터 결과가 없는 경우
     # ------------------------------------------------------------
+    if filtered_df.empty:
+        st.warning(
+            "현재 필터 조건에 해당하는 사고 데이터가 없어 "
+            "AI 분석을 생성할 수 없습니다."
+        )
+
+
+    # ============================================================
+    # 대기 중인 AI 보고서 생성
+    #
+    # pop()을 사용하여 생성 시작과 동시에 pending 상태 제거
+    # → Streamlit 재실행 시 같은 API가 자동으로 재호출되는 것을 방지
+    # ============================================================
+
+    clicked_report_type = st.session_state.pop(
+        "pending_ai_report_type",
+        None,
+    )
+
+
     if clicked_report_type is not None:
+
         report_info = ai_report_types[clicked_report_type]
 
         try:
+
             with st.spinner(report_info["spinner"]):
+
                 ai_result, _, ai_usage = generate_ai_report(
                     analysis_package=analysis_package_preview,
                     report_type=clicked_report_type,
                 )
 
-            st.session_state[f"ai_result_{clicked_report_type}"] = ai_result
-            st.session_state[f"ai_usage_{clicked_report_type}"] = ai_usage
-            st.session_state[f"ai_signature_{clicked_report_type}"] = (
-                current_filter_signature
-            )
-            st.session_state[f"ai_filters_{clicked_report_type}"] = (
-                selected_filter_info
-            )
-            st.session_state["selected_ai_report_type"] = clicked_report_type
+            # ----------------------------------------------------
+            # 생성 결과 저장
+            # ----------------------------------------------------
+            st.session_state[
+                f"ai_result_{clicked_report_type}"
+            ] = ai_result
+
+            st.session_state[
+                f"ai_usage_{clicked_report_type}"
+            ] = ai_usage
+
+            st.session_state[
+                f"ai_signature_{clicked_report_type}"
+            ] = current_filter_signature
+
+            st.session_state[
+                f"ai_filters_{clicked_report_type}"
+            ] = selected_filter_info
+
 
         except Exception as error:
-            st.error(f"{report_info['title']} 생성 중 오류가 발생했습니다.")
-            st.code(str(error))
+
+            # ----------------------------------------------------
+            # 오류 표시
+            # 단순 오류문구뿐 아니라 실제 Exception 종류와
+            # 상세 메시지를 화면에서 바로 확인할 수 있도록 표시
+            # ----------------------------------------------------
+            st.error(
+                f"{report_info['title']} 생성 중 오류가 발생했습니다."
+            )
+
+            st.code(
+                f"{type(error).__name__}: {error}"
+            )
 
     # ------------------------------------------------------------
     # 생성된 AI 결과 표시
@@ -3928,19 +4023,64 @@ with ai_tab:
             # - 제목/소제목 크기는 기존 Streamlit Markdown 유지
             # - 일반 본문과 목록 글자만 확대
             # --------------------------------------------------------
+
             st.markdown(
                 """
                 <style>
-                div[data-testid="stExpander"] div[data-testid="stMarkdownContainer"] p {
+
+                /* ---------------------------------------------------------
+                AI 보고서 일반 본문
+                --------------------------------------------------------- */
+                div[data-testid="stExpander"]
+                div[data-testid="stMarkdownContainer"] p {
                     font-size: 1.2rem !important;
                     line-height: 1.85 !important;
+                    margin-top: 0.25rem !important;
+                    margin-bottom: 0.7rem !important;
                 }
 
-                div[data-testid="stExpander"] div[data-testid="stMarkdownContainer"] li {
+                /* ---------------------------------------------------------
+                AI 보고서 목록
+                --------------------------------------------------------- */
+                div[data-testid="stExpander"]
+                div[data-testid="stMarkdownContainer"] li {
                     font-size: 1.2rem !important;
                     line-height: 1.8 !important;
                     margin-bottom: 0.25rem !important;
                 }
+
+                /* ---------------------------------------------------------
+                큰 항목 제목
+                예: 1. 전략 판단
+                Markdown ## → h2
+                --------------------------------------------------------- */
+                div[data-testid="stExpander"]
+                div[data-testid="stMarkdownContainer"] h2 {
+                    margin-top: 1.8rem !important;
+                    margin-bottom: 0.8rem !important;
+                }
+
+                /* ---------------------------------------------------------
+                작은 소제목
+                예: 1) 우선 개입 판단
+                Markdown ### → h3
+
+                현재보다 위쪽 여백을 넓히고,
+                제목 아래 여백은 좁게 조정
+                --------------------------------------------------------- */
+                div[data-testid="stExpander"]
+                div[data-testid="stMarkdownContainer"] h3 {
+                    margin-top: 1.4rem !important;
+                    margin-bottom: 0.35rem !important;
+                    padding-bottom: 0 !important;
+                }
+
+                /* 소제목 바로 다음 문단의 위쪽 여백 최소화 */
+                div[data-testid="stExpander"]
+                div[data-testid="stMarkdownContainer"] h3 + p {
+                    margin-top: 0 !important;
+                }
+
                 </style>
                 """,
                 unsafe_allow_html=True,

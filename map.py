@@ -1884,7 +1884,16 @@ def generate_ai_report(analysis_package, report_type):
         web_search_calls=web_search_calls,
     )
 
+# ============================================================
+# AI 응답 최종 표시문 정리
+# - Web Search 출처 링크 변환
+# - AI가 실수로 생성한 Markdown 취소선 기호(~~) 제거
+# ============================================================
+
     display_text = _format_response_with_clickable_citations(response)
+
+    # 모든 AI 분석 유형에서 Markdown 취소선 방지
+    display_text = display_text.replace("~~", "")
 
     return display_text, analysis_json, usage_info
 
@@ -2077,12 +2086,12 @@ if "acdnt_gae_dc" in df.columns:
 else:
     type_options = []
 
-sidebar_filter_title("사고분류", margin_bottom=14)
+sidebar_filter_title("사고분류 (복수선택)", margin_bottom=14)
 
 selected_types = st.sidebar.multiselect(
     "사고분류 (복수 선택)",
     type_options,
-    placeholder="전체 (미선택 시)",
+    placeholder="전체",
     label_visibility="collapsed",
 )
 
@@ -2159,14 +2168,14 @@ st.sidebar.markdown(
     """
     <div style="
         margin-top:-9px;
-        margin-bottom:3px;
+        margin-bottom:9px;
         color:#64748B;
         font-size:0.78rem;
         line-height:1.35;
     "
     >
-        ※ 22시~06시와 같이 자정을 포함한 검색 가능
-        ※ '분'을 제거한 시간으로 검색 / 07시15분 → 07시에 포함
+        ※ 자정을 포함한 검색 가능 (ex : 22시~06시)<br>
+        ※ 검색단위는 '분'을 제거한 시각 (ex : 7시15분 → 7시)
     </div>
     """,
     unsafe_allow_html=True,
@@ -3939,51 +3948,6 @@ with ai_tab:
                 "최종 활용 전 담당자의 통계·현장 확인이 필요합니다."
             )
 
-        # --------------------------------------------------------
-        # 호출별 사용량·비용 확인
-        # --------------------------------------------------------
-        usage_info = st.session_state.get(
-            f"ai_usage_{selected_ai_report_type}"
-        )
-
-        if usage_info:
-            with st.expander("💰 AI 사용량 · 예상비용", expanded=False):
-                usage_col1, usage_col2, usage_col3, usage_col4 = st.columns(4)
-
-                usage_col1.metric(
-                    "입력 토큰",
-                    f"{usage_info.get('input_tokens', 0):,}",
-                )
-                usage_col2.metric(
-                    "출력 토큰",
-                    f"{usage_info.get('output_tokens', 0):,}",
-                )
-                usage_col3.metric(
-                    "Reasoning 토큰",
-                    f"{usage_info.get('reasoning_tokens', 0):,}",
-                )
-                usage_col4.metric(
-                    "웹검색",
-                    f"{usage_info.get('web_search_calls', 0):,}회",
-                )
-
-                estimated_cost = usage_info.get("estimated_cost_usd")
-                if estimated_cost is not None:
-                    st.markdown(
-                        f"**예상 API 비용:** 약 `${estimated_cost:,.4f}`  "
-                        f"· 모델: `{usage_info.get('model', '-')}`  "
-                        f"· Reasoning: `{usage_info.get('reasoning_effort', '-')}`"
-                    )
-                else:
-                    st.markdown(
-                        f"**사용 모델:** `{usage_info.get('model', '-')}` · "
-                        "해당 모델의 가격표가 코드에 등록되지 않아 비용은 계산하지 않았습니다."
-                    )
-
-                st.caption(
-                    "예상비용은 2026년 8월 공개 표준요금을 기준으로 계산한 참고값입니다. "
-                    "웹검색 콘텐츠 토큰·캐시 적용·향후 가격변경 등에 따라 실제 청구액과 차이가 날 수 있습니다."
-                )
 
         # 이미 생성한 다른 유형의 결과를 API 재호출 없이 열람
         available_report_types = [

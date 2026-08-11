@@ -2175,7 +2175,7 @@ st.sidebar.markdown(
     "
     >
         ※ 자정을 포함한 검색 가능 (ex : 22시~06시)<br>
-        ※ 검색단위는 '분'을 제거한 시각 (ex : 7시15분 → 7시)
+        ※ '분'을 제거한 시각 검색 (ex : 7시15분 → 7시)
     </div>
     """,
     unsafe_allow_html=True,

@@ -32,7 +32,7 @@ st.set_page_config(
 # 0-1. 메인 제목 및 부제목
 # Streamlit 기본 제목 방식 사용
 # -----------------------------------
-st.title("🗺️ Traffic Atlas AI")
+st.title("🗺️ Traffic Accident Analysis Platform - AI")
 
 st.markdown(
     """
@@ -41,8 +41,10 @@ st.markdown(
         color: #64748B;
         margin-top: -12px;
         margin-bottom: 16px;
+        margin-left: 15px;
+
     ">
-        대전경찰 교통사고 AI 분석 및 의사결정 지원시스템
+        교통사고 AI 분석 및 의사결정 지원시스템
     </div>
     """,
     unsafe_allow_html=True,

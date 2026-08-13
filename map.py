@@ -32,7 +32,7 @@ st.set_page_config(
 # 0-1. 메인 제목 및 부제목
 # Streamlit 기본 제목 방식 사용
 # -----------------------------------
-st.title("🗺️ TAP - AI")
+st.title("🗺️ TAAP - AI")
 
 st.markdown(
     """
@@ -43,7 +43,7 @@ st.markdown(
         margin-bottom: 16px;
         margin-left: 100px;
 
-    "Traffic Accident Analysis Platform
+    교통사고 AI 분석 및 의사결정 지원 시스템
     </div>
     """,
     unsafe_allow_html=True,

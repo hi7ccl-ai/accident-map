@@ -1919,6 +1919,677 @@ def make_filter_signature(selected_filter_info, target_df):
     ).hexdigest()
 
 
+
+# ============================================================
+# 0-3. AI 자연어 조건검색
+# - 사용자의 자연어를 기존 12개 필터 값으로 변환
+# - GPT는 '해석'만 담당하고 실제 필터링은 기존 Streamlit 로직이 수행
+# - 모호하거나 지원하지 않는 표현은 임의 적용하지 않고 확인 메시지 반환
+# ============================================================
+
+def parse_natural_language_filters(user_query, filter_catalog):
+    """
+    자연어 검색문을 현재 지도 필터 구조에 맞는 JSON으로 변환한다.
+
+    설계 원칙
+    - gpt-5.6-luna + Structured Outputs 사용
+    - 자연어 → 필터값 변환만 수행
+    - 데이터 계산/검색은 기존 Python 코드가 수행
+    - 명시되지 않은 조건은 전체로 처리
+    - 모호한 표현은 status='need_clarification'으로 반환
+    """
+    if OpenAI is None:
+        raise RuntimeError(
+            "openai 라이브러리가 설치되지 않았습니다. "
+            "requirements.txt에 최신 'openai'를 추가하세요."
+        )
+
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    except KeyError as exc:
+        raise RuntimeError(
+            "Streamlit Secrets에 OPENAI_API_KEY를 등록하세요."
+        ) from exc
+
+    client = OpenAI(api_key=api_key)
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["ready", "need_clarification"],
+            },
+            "clarification_question": {
+                "type": "string",
+            },
+            "interpretation_summary": {
+                "type": "string",
+            },
+            "station": {
+                "type": ["string", "null"],
+            },
+            "start_year_month": {
+                "type": ["string", "null"],
+            },
+            "end_year_month": {
+                "type": ["string", "null"],
+            },
+            "accident_severity": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "accident_type": {
+                "type": ["string", "null"],
+            },
+            "start_time": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 23,
+            },
+            "end_time": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 23,
+            },
+            "weekdays": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "offending_vehicles": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "damaged_vehicles": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "fatal_types": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "fatal_age_groups": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "weather": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "violations": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "hotspot_requested": {
+                "type": "boolean",
+            },
+            "hotspot_radius": {
+                "type": ["integer", "null"],
+                "minimum": 50,
+                "maximum": 300,
+            },
+            "hotspot_top_n": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 10,
+            },
+        },
+        "required": [
+            "status",
+            "clarification_question",
+            "interpretation_summary",
+            "station",
+            "start_year_month",
+            "end_year_month",
+            "accident_severity",
+            "accident_type",
+            "start_time",
+            "end_time",
+            "weekdays",
+            "offending_vehicles",
+            "damaged_vehicles",
+            "fatal_types",
+            "fatal_age_groups",
+            "weather",
+            "violations",
+            "hotspot_requested",
+            "hotspot_radius",
+            "hotspot_top_n",
+        ],
+        "additionalProperties": False,
+    }
+
+    rules = """
+[경찰 교통사고 자연어 검색 규칙]
+
+1. '보행자 사고'는 피해차량=보행자로 해석한다.
+   - '보행자 사망사고' = 피해차량 보행자 + 사고분류 사망사고
+   - '보행자 중상사고' = 피해차량 보행자 + 사고분류 중상사고
+
+2. 그 외 'OOO 사고'에서 OOO가 차종이면 가해차량=OOO로 해석한다.
+   - 예: 이륜차 사고 = 가해차량 이륜
+   - 예: 화물차 사망사고 = 가해차량 화물 + 사고분류 사망사고
+   - 예: 승용차 중상사고 = 가해차량 승용 + 사고분류 중상사고
+
+3. 차종 동의어를 실제 필터값으로 정규화한다.
+   - 승용차→승용, 승합차→승합, 화물차→화물
+   - 오토바이/이륜차→이륜
+   - 원동기장치자전거/원동기→원동기
+   - 개인형이동장치/퍼스널모빌리티/PM→PM
+   - 자전거→자전거, ATV→ATV
+
+4. 시간 표현
+   - 심야 = 00시~03시
+   - 주간 = 06시~17시
+   - 야간/밤 = 18시~익일 05시
+   - 사용자가 구체적인 시작·종료시간을 직접 말하면 그 시간이 위 규칙보다 우선한다.
+   - 자정을 넘는 범위도 그대로 start_time > end_time 형태로 반환한다.
+
+5. 요일 표현
+   - 평일 = 월요일, 화요일, 수요일, 목요일, 금요일
+   - 주말 = 토요일, 일요일
+   - 사용자가 특정 요일을 말하면 해당 요일만 반환한다.
+
+6. 기간 표현
+   - '25년', '25년도', '2025년' = start_year_month="2025-01",
+     end_year_month="2025-12"
+   - '24년' = start_year_month="2024-01",
+     end_year_month="2024-12"
+   - '최근 N년'은 반드시 2025년 12월을 끝단으로 N개 연도를 계산한다.
+     예: 최근 3년 = start_year_month="2023-01",
+     end_year_month="2025-12"
+   - 사용자가 특정 월을 말하면 해당 월을 YYYY-MM 형식으로 반환한다.
+   - start_year_month와 end_year_month는 반드시 YYYY-MM 형식으로 반환한다.
+
+7. '위험지역', '사고 많은 곳', '사고다발지역', '사고다발지점'은
+   hotspot_requested=true로 해석한다.
+   다른 필터조건이 함께 있으면 그 조건을 먼저 적용한 뒤 사고다발지점을 탐색한다.
+
+8. 날씨 표현
+   - 사용자의 문장에서 날씨 상태를 의미하는 표현이 있으면 weather 필터에 반드시 반영한다.
+   - '비가 오는 날', '비 오는 날', '비오는 날', '우천', '강우' → weather=["비"]
+   - '눈이 오는 날', '눈 오는 날', '눈오는 날', '강설' → weather=["눈"]
+   - '안개 낀 날', '안개가 낀 날', '안개 발생', '안개' → weather=["안개"]
+   - '흐린 날', '흐림', '흐린 날씨' → weather=["흐림"]
+   - '맑은 날', '맑음', '화창한 날' → weather=["맑음"]
+   - 여러 날씨가 함께 명시되면 해당 값을 모두 weather 배열에 넣는다.
+   - 단, '악천후 사고'처럼 구체적인 날씨 상태가 명시되지 않은 표현은
+     자동으로 범위를 정하지 않고 status='need_clarification'으로 한다.
+     이 경우 어떤 날씨(예: 비, 눈, 안개)를 포함할지 구체적으로 입력하도록 요청한다.
+
+9. 다음 표현은 별도 규칙으로 만들지 않는다.
+   - 차량 사고
+   - 인명피해 사고
+   - 법규위반 사고
+   사용자가 이런 표현만으로 검색하면 정확한 조건을 확인하도록 요청한다.
+
+10. 명시되지 않은 필터는 null 또는 빈 배열로 반환한다.
+    기존 화면의 이전 필터값을 추측하거나 유지하려 하지 않는다.
+
+11. 지원되는 필터 범위를 넘어서는 조건은 임의로 다른 필터에 끼워 맞추지 않는다.
+    정확한 필터가 없으면 status='need_clarification'으로 하고 이유를 짧게 안내한다.
+
+12. 사용자가 '사망자 유형'이나 '사망자 연령'을 명시적으로 말한 경우에만
+    fatal_types/fatal_age_groups를 사용한다.
+    '보행자 사망사고'는 fatal_types가 아니라 피해차량=보행자로 처리한다.
+
+13. 경찰 실무에서 사용하지 않는 사고분류 용어를 임의로 만들어내지 않는다.
+
+14. 사고다발지점 탐색조건
+   - 사용자가 분석반경을 명시하면 hotspot_radius에 미터 단위 정수로 반환한다.
+   - 예: '반경 150m', '150미터 반경', '분석반경 150미터'
+     → hotspot_radius=150
+   - 사용자가 사고다발지점 개수를 명시하면 hotspot_top_n에 정수로 반환한다.
+   - 예: '사고다발지점 3개', '상위 3곳', 'TOP 3'
+     → hotspot_top_n=3
+   - 사고다발지점 탐색을 요청했지만 반경이나 개수를 명시하지 않은 경우
+     hotspot_radius=null, hotspot_top_n=null로 반환한다.
+   - 반경 또는 사고다발지점 개수를 명시한 문장은
+     hotspot_requested=true로 해석한다.
+""".strip()
+
+    catalog_text = json.dumps(
+        filter_catalog,
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
+
+    prompt = f"""
+당신은 경찰 교통사고 분석시스템의 자연어 조건검색 해석기다.
+사용자가 입력한 문장을 아래 시스템의 실제 필터값으로 변환하라.
+
+중요:
+- 설명문을 작성하지 말고 지정된 JSON Schema에 맞는 값만 반환한다.
+- 범주형 필터값은 반드시 아래 [실제 사용 가능한 필터값] 중에서 선택한다.
+- start_year_month와 end_year_month는 예외로,
+  available_period가 나타내는 시작월~종료월 범위 안에서
+  YYYY-MM 형식의 임의 월을 반환할 수 있다.
+- 명확하면 status='ready'.
+- 모호하거나 지원할 수 없는 조건이면 status='need_clarification'.
+- clarification_question은 ready일 때 빈 문자열로 한다.
+- interpretation_summary에는 화면에 보여줄 짧은 한국어 해석결과를 작성한다.
+
+{rules}
+
+[실제 사용 가능한 필터값]
+{catalog_text}
+
+[사용자 입력]
+{user_query}
+""".strip()
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt,
+        max_output_tokens=1800,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "traffic_filter_parser",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+
+    output_text = getattr(response, "output_text", "") or ""
+    if not output_text.strip():
+        raise RuntimeError("AI 자연어 검색 결과가 비어 있습니다.")
+
+    parsed_result = json.loads(output_text)
+
+    parsed_result = _supplement_weather_from_query(
+        parsed_result=parsed_result,
+        user_query=user_query,
+        filter_catalog=filter_catalog,
+    )
+
+    return parsed_result
+
+
+def _supplement_weather_from_query(
+    parsed_result,
+    user_query,
+    filter_catalog,
+):
+    """
+    자연어 문장에 명백한 날씨 표현이 있는데 GPT가 놓친 경우 보정한다.
+
+    - 명확한 날씨 표현만 결정론적으로 매핑
+    - '악천후'는 기존 규칙대로 사용자 확인 대상으로 남김
+    - 실제 데이터에 존재하는 날씨 필터값만 반영
+    """
+    query = str(user_query).strip()
+    if not query:
+        return parsed_result
+
+    # 악천후는 구체 범위를 임의로 정하지 않음
+    if "악천후" in query:
+        return parsed_result
+
+    weather_phrase_map = {
+        "비": [
+            "비가 오는 날",
+            "비 오는 날",
+            "비오는 날",
+            "비가 올 때",
+            "비 올 때",
+            "우천",
+            "강우",
+        ],
+        "눈": [
+            "눈이 오는 날",
+            "눈 오는 날",
+            "눈오는 날",
+            "눈이 올 때",
+            "눈 올 때",
+            "강설",
+        ],
+        "안개": [
+            "안개 낀 날",
+            "안개가 낀 날",
+            "안개 발생",
+            "안개",
+        ],
+        "흐림": [
+            "흐린 날",
+            "흐린 날씨",
+            "흐림",
+        ],
+        "맑음": [
+            "맑은 날",
+            "맑은 날씨",
+            "맑음",
+            "화창한 날",
+        ],
+    }
+
+    allowed_weather = {
+        str(value)
+        for value in filter_catalog.get("weather", [])
+    }
+
+    detected = []
+
+    for weather_value, phrases in weather_phrase_map.items():
+        if weather_value not in allowed_weather:
+            continue
+
+        if any(phrase in query for phrase in phrases):
+            detected.append(weather_value)
+
+    if not detected:
+        return parsed_result
+
+    current_weather = parsed_result.get("weather", []) or []
+    merged_weather = []
+
+    for value in list(current_weather) + detected:
+        if (
+            str(value) in allowed_weather
+            and value not in merged_weather
+        ):
+            merged_weather.append(value)
+
+    parsed_result["weather"] = merged_weather
+
+    # 명백한 날씨 표현을 인식했으므로,
+    # 다른 모호성이 없다면 날씨 누락만으로 확인질문을 할 필요 없음
+    clarification = str(
+        parsed_result.get("clarification_question", "")
+    ).strip()
+
+    weather_only_clarification_terms = [
+        "날씨",
+        "비",
+        "눈",
+        "안개",
+        "흐림",
+        "맑음",
+    ]
+
+    if (
+        parsed_result.get("status") == "need_clarification"
+        and clarification
+        and any(
+            term in clarification
+            for term in weather_only_clarification_terms
+        )
+        and "악천후" not in query
+    ):
+        parsed_result["status"] = "ready"
+        parsed_result["clarification_question"] = ""
+
+    return parsed_result
+
+
+def _validated_list(values, allowed_values):
+    """AI가 반환한 배열을 현재 실제 필터값 범위 안으로 제한한다."""
+    allowed = {str(value) for value in allowed_values}
+    return [
+        value
+        for value in values
+        if str(value) in allowed
+    ]
+
+
+def _queue_natural_language_filters(parsed_result, filter_catalog):
+    """
+    AI 해석결과를 다음 Streamlit 실행에서 적용하도록 대기열에 저장한다.
+    기존 필터는 모두 초기화하고 자연어에서 명시된 조건만 적용한다.
+    """
+    if parsed_result.get("status") != "ready":
+        return
+
+    pending = {
+        "station": (
+            parsed_result.get("station")
+            if parsed_result.get("station") in filter_catalog["stations"]
+            else None
+        ),
+        "start_year_month": parsed_result.get("start_year_month"),
+        "end_year_month": parsed_result.get("end_year_month"),
+        "accident_severity": _validated_list(
+            parsed_result.get("accident_severity", []),
+            filter_catalog["accident_severity"],
+        ),
+        "accident_type": (
+            parsed_result.get("accident_type")
+            if parsed_result.get("accident_type")
+            in filter_catalog["accident_types"]
+            else None
+        ),
+        "start_time": parsed_result.get("start_time"),
+        "end_time": parsed_result.get("end_time"),
+        "weekdays": _validated_list(
+            parsed_result.get("weekdays", []),
+            filter_catalog["weekdays"],
+        ),
+        "offending_vehicles": _validated_list(
+            parsed_result.get("offending_vehicles", []),
+            filter_catalog["offending_vehicles"],
+        ),
+        "damaged_vehicles": _validated_list(
+            parsed_result.get("damaged_vehicles", []),
+            filter_catalog["damaged_vehicles"],
+        ),
+        "fatal_types": _validated_list(
+            parsed_result.get("fatal_types", []),
+            filter_catalog["fatal_types"],
+        ),
+        "fatal_age_groups": _validated_list(
+            parsed_result.get("fatal_age_groups", []),
+            filter_catalog["fatal_age_groups"],
+        ),
+        "weather": _validated_list(
+            parsed_result.get("weather", []),
+            filter_catalog["weather"],
+        ),
+        "violations": _validated_list(
+            parsed_result.get("violations", []),
+            filter_catalog["violations"],
+        ),
+        "hotspot_requested": bool(
+            parsed_result.get("hotspot_requested", False)
+            or parsed_result.get("hotspot_radius") is not None
+            or parsed_result.get("hotspot_top_n") is not None
+        ),
+        "hotspot_radius": parsed_result.get("hotspot_radius"),
+        "hotspot_top_n": parsed_result.get("hotspot_top_n"),
+        "interpretation_summary": (
+            parsed_result.get("interpretation_summary", "")
+        ),
+    }
+
+    st.session_state["_pending_natural_filters"] = pending
+
+
+def _apply_pending_natural_filter_state():
+    """
+    사이드바 위젯이 생성되기 전에 대기 중인 자연어 필터를 session_state에 적용한다.
+    발생연월은 year_month_options 생성 후 별도로 적용한다.
+    """
+    pending = st.session_state.pop(
+        "_pending_natural_filters",
+        None,
+    )
+
+    if not pending:
+        return
+
+    # ========================================================
+    # 새 자연어 검색 시작 시 기존 검색조건 완전 초기화
+    #
+    # 원칙
+    # - 이전 사이드바 조건을 이어받지 않음
+    # - 새 문장에 명시된 조건만 다시 적용
+    # - 명시되지 않은 조건은 전체/기본값으로 복귀
+    # ========================================================
+
+    # 위젯이 생성되기 전에 이전 상태를 제거
+    filter_keys = [
+        "filter_station",
+        "filter_year_month",
+        "filter_severity",
+        "filter_accident_type",
+        "start_time",
+        "end_time",
+        "filter_offending_vehicle",
+        "filter_damaged_vehicle",
+        "filter_fatal_type",
+        "filter_fatal_age",
+        "filter_weather",
+        "filter_violation",
+    ]
+
+    for key in filter_keys:
+        st.session_state.pop(key, None)
+
+    # 체크박스 요일도 모두 초기화
+    for weekday in [
+        "월요일",
+        "화요일",
+        "수요일",
+        "목요일",
+        "금요일",
+        "토요일",
+        "일요일",
+    ]:
+        st.session_state[
+            f"weekday_checkbox_{weekday}"
+        ] = False
+
+    # --------------------------------------------------------
+    # 명시되지 않은 조건의 기본값
+    # --------------------------------------------------------
+    st.session_state["filter_station"] = "전체"
+    st.session_state["filter_severity"] = []
+    st.session_state["filter_accident_type"] = "전체"
+    st.session_state["start_time"] = 0
+    st.session_state["end_time"] = 23
+    st.session_state["filter_offending_vehicle"] = []
+    st.session_state["filter_damaged_vehicle"] = []
+    st.session_state["filter_fatal_type"] = []
+    st.session_state["filter_fatal_age"] = []
+    st.session_state["filter_weather"] = []
+    st.session_state["filter_violation"] = []
+
+    # 사고다발지점 설정도 새 검색마다 기본값으로 초기화
+    st.session_state["hotspot_radius"] = 100
+    st.session_state["hotspot_top_n"] = 5
+    st.session_state.pop(
+        "natural_search_hotspot_requested",
+        None,
+    )
+
+    # --------------------------------------------------------
+    # 자연어 검색에서 명시된 조건만 덮어쓰기
+    # --------------------------------------------------------
+    station = pending.get("station")
+    if station:
+        st.session_state["filter_station"] = station
+
+    st.session_state["filter_severity"] = pending.get(
+        "accident_severity",
+        [],
+    )
+
+    accident_type = pending.get("accident_type")
+    if accident_type:
+        st.session_state["filter_accident_type"] = accident_type
+
+    start_time_value = pending.get("start_time")
+    end_time_value = pending.get("end_time")
+
+    if start_time_value is not None:
+        st.session_state["start_time"] = int(start_time_value)
+
+    if end_time_value is not None:
+        st.session_state["end_time"] = int(end_time_value)
+
+    selected_weekdays_pending = set(
+        pending.get("weekdays", [])
+    )
+    for weekday in [
+        "월요일",
+        "화요일",
+        "수요일",
+        "목요일",
+        "금요일",
+        "토요일",
+        "일요일",
+    ]:
+        st.session_state[
+            f"weekday_checkbox_{weekday}"
+        ] = weekday in selected_weekdays_pending
+
+    st.session_state["filter_offending_vehicle"] = pending.get(
+        "offending_vehicles",
+        [],
+    )
+    st.session_state["filter_damaged_vehicle"] = pending.get(
+        "damaged_vehicles",
+        [],
+    )
+    st.session_state["filter_fatal_type"] = pending.get(
+        "fatal_types",
+        [],
+    )
+    st.session_state["filter_fatal_age"] = pending.get(
+        "fatal_age_groups",
+        [],
+    )
+    st.session_state["filter_weather"] = pending.get(
+        "weather",
+        [],
+    )
+    st.session_state["filter_violation"] = pending.get(
+        "violations",
+        [],
+    )
+
+    # 연월은 pd.Period 목록이 만들어진 뒤 적용
+    st.session_state["_pending_natural_period"] = {
+        "start": pending.get("start_year_month"),
+        "end": pending.get("end_year_month"),
+    }
+
+    summary_text = pending.get(
+        "interpretation_summary",
+        "",
+    )
+    summary_text = str(summary_text).replace("~", "∼")
+
+    st.session_state["natural_search_last_summary"] = summary_text
+
+    # --------------------------------------------------------
+    # 사고다발지점 탐색 설정
+    # - 새 자연어 검색마다 기본값 100m / 5개로 초기화
+    # - 자연어에서 반경/개수를 명시하면 해당 값으로 변경
+    # --------------------------------------------------------
+    hotspot_radius_value = pending.get("hotspot_radius")
+    if hotspot_radius_value is not None:
+        hotspot_radius_value = int(hotspot_radius_value)
+        if 50 <= hotspot_radius_value <= 300:
+            st.session_state["hotspot_radius"] = hotspot_radius_value
+
+    hotspot_top_n_value = pending.get("hotspot_top_n")
+    if hotspot_top_n_value is not None:
+        hotspot_top_n_value = int(hotspot_top_n_value)
+        if 1 <= hotspot_top_n_value <= 10:
+            st.session_state["hotspot_top_n"] = hotspot_top_n_value
+
+    if pending.get("hotspot_requested"):
+        st.session_state["natural_search_hotspot_requested"] = True
+    else:
+        st.session_state.pop(
+            "natural_search_hotspot_requested",
+            None,
+        )
+
+
+
 # -----------------------------------
 # 1. SHP 파일 및 데이터 읽기 (캐싱 처리)
 # -----------------------------------
@@ -1950,6 +2621,9 @@ def load_gis_data():
 
 
 gdf, ps_boundary, center = load_gis_data()
+
+# 자연어 검색으로 대기 중인 필터가 있으면 사이드바 생성 전에 적용
+_apply_pending_natural_filter_state()
 
 # -----------------------------------
 # 2. 스트림릿 사이드바 필터 구현
@@ -2012,16 +2686,17 @@ sidebar_filter_title("관할 경찰서", margin_bottom=14)
 selected_ps = st.sidebar.selectbox(
     "관할 경찰서",
     station_options,
+    key="filter_station",
     label_visibility="collapsed",
 )
 
 # -----------------------------------
 # [순서 2] 발생 연월 선택
-# accident_date 컬럼 활용
-# 예) 2023년 3월 ~ 2024년 5월
+# - 자연어 검색 결과와 사이드바 범위 슬라이더 연동
+# - Session State만 사용
+# - value= 와 Session State의 중복 지정 방지
 # -----------------------------------
 
-# Parquet에서 날짜형으로 정상 로드되도록 자료형 확인
 df["accident_date"] = pd.to_datetime(
     df["accident_date"],
     errors="coerce",
@@ -2039,26 +2714,145 @@ year_month_options = (
 
 sidebar_filter_title("발생연월", margin_bottom=14)
 
-# 데이터가 비어 있거나 날짜 변환에 실패해도 이후 코드에서 안전하게 참조
 start_year_month = None
 end_year_month = None
 
+
 if year_month_options:
-    start_year_month, end_year_month = (
-        st.sidebar.select_slider(
-            "발생연월 범위",
-            options=year_month_options,
-            value=(
-                year_month_options[0],
-                year_month_options[-1],
-            ),
-            format_func=lambda value: (
-                f"{value.year}년 {value.month}월"
-            ),
-            label_visibility="collapsed",
-        )
+
+    # ========================================================
+    # 1. 자연어 검색에서 전달된 기간이 있으면
+    #    위젯이 생성되기 전에 Session State에 반영
+    # ========================================================
+    pending_period = st.session_state.pop(
+        "_pending_natural_period",
+        None,
     )
 
+    if pending_period is not None:
+
+        period_start_text = pending_period.get("start")
+        period_end_text = pending_period.get("end")
+
+        # 시작월 변환
+        try:
+            natural_start_period = (
+                pd.Period(period_start_text, freq="M")
+                if period_start_text
+                else year_month_options[0]
+            )
+        except Exception:
+            natural_start_period = year_month_options[0]
+
+        # 종료월 변환
+        try:
+            natural_end_period = (
+                pd.Period(period_end_text, freq="M")
+                if period_end_text
+                else year_month_options[-1]
+            )
+        except Exception:
+            natural_end_period = year_month_options[-1]
+
+        # ----------------------------------------------------
+        # 실제 데이터 범위를 벗어나지 않도록 제한
+        # ----------------------------------------------------
+        natural_start_period = max(
+            year_month_options[0],
+            min(
+                natural_start_period,
+                year_month_options[-1],
+            ),
+        )
+
+        natural_end_period = max(
+            year_month_options[0],
+            min(
+                natural_end_period,
+                year_month_options[-1],
+            ),
+        )
+
+        # 시작월과 종료월이 뒤집힌 경우 교정
+        if natural_start_period > natural_end_period:
+            natural_start_period, natural_end_period = (
+                natural_end_period,
+                natural_start_period,
+            )
+
+        st.session_state["filter_year_month"] = (
+            natural_start_period,
+            natural_end_period,
+        )
+
+
+    # ========================================================
+    # 2. 최초 실행 시 기본 기간 설정
+    #    전체 데이터 기간
+    # ========================================================
+    if "filter_year_month" not in st.session_state:
+        st.session_state["filter_year_month"] = (
+            year_month_options[0],
+            year_month_options[-1],
+        )
+
+
+    # ========================================================
+    # 3. 기존 Session State 값 안전성 검사
+    #
+    # 예전 오류로 Period 단일값이 들어가 있거나
+    # 잘못된 자료형이 남아 있어도 자동 복구
+    # ========================================================
+    current_period_value = st.session_state.get(
+        "filter_year_month"
+    )
+
+    is_valid_range = (
+        isinstance(current_period_value, (tuple, list))
+        and len(current_period_value) == 2
+        and current_period_value[0] in year_month_options
+        and current_period_value[1] in year_month_options
+    )
+
+    if not is_valid_range:
+        st.session_state["filter_year_month"] = (
+            year_month_options[0],
+            year_month_options[-1],
+        )
+
+
+    # ========================================================
+    # 4. 발생연월 범위 슬라이더
+    #
+    # 중요:
+    # Session State에 이미 값이 있으므로
+    # 여기서는 value= 를 절대 사용하지 않음
+    # ========================================================
+    selected_year_month_range = st.sidebar.select_slider(
+        "발생연월 범위",
+        options=year_month_options,
+        key="filter_year_month",
+        format_func=lambda value: (
+            f"{value.year}년 {value.month}월"
+        ),
+        label_visibility="collapsed",
+    )
+
+
+    # ========================================================
+    # 5. 반환값을 시작월·종료월로 분리
+    # ========================================================
+    if (
+        isinstance(selected_year_month_range, (tuple, list))
+        and len(selected_year_month_range) == 2
+    ):
+        start_year_month = selected_year_month_range[0]
+        end_year_month = selected_year_month_range[1]
+
+    else:
+        # 예상치 못한 단일값 반환 시 안전 처리
+        start_year_month = selected_year_month_range
+        end_year_month = selected_year_month_range
 
 # -----------------------------------
 # [순서 3] 사고분류 선택
@@ -2093,6 +2887,7 @@ sidebar_filter_title("사고분류 (복수선택)", margin_bottom=14)
 selected_types = st.sidebar.multiselect(
     "사고분류 (복수 선택)",
     type_options,
+    key="filter_severity",
     placeholder="전체",
     label_visibility="collapsed",
 )
@@ -2129,6 +2924,7 @@ sidebar_filter_title("사고종별", margin_bottom=14)
 selected_hdc = st.sidebar.selectbox(
     "사고종별",
     hdc_options,
+    key="filter_accident_type",
     label_visibility="collapsed",
 )
 
@@ -2143,13 +2939,19 @@ sidebar_filter_title(
 )
 
 time_options = list(range(24))
+
+if "start_time" not in st.session_state:
+    st.session_state["start_time"] = 0
+
+if "end_time" not in st.session_state:
+    st.session_state["end_time"] = 23
+
 time_col1, time_col2 = st.sidebar.columns(2)
 
 with time_col1:
     start_time = st.selectbox(
         "시작시간",
         options=time_options,
-        index=0,
         format_func=lambda x: f"{x:02d}시",
         key="start_time",
         label_visibility="collapsed",
@@ -2159,7 +2961,6 @@ with time_col2:
     end_time = st.selectbox(
         "종료시간",
         options=time_options,
-        index=23,
         format_func=lambda x: f"{x:02d}시",
         key="end_time",
         label_visibility="collapsed",
@@ -2177,7 +2978,7 @@ st.sidebar.markdown(
     "
     >
         ※ 자정을 포함한 검색 가능 (ex : 22시~06시)<br>
-        ※ 검색단위는 '분'을 제거한 시각 (ex : 7시15분 → 7시)
+        ※ 검색 시 '분'을 제거 (0시는 0시~0시59분)
     </div>
     """,
     unsafe_allow_html=True,
@@ -2236,10 +3037,14 @@ selected_weekdays = []
 
 for index, weekday in enumerate(weekday_options):
     with weekday_cols[index]:
+        checkbox_key = f"weekday_checkbox_{weekday}"
+
+        if checkbox_key not in st.session_state:
+            st.session_state[checkbox_key] = False
+
         is_selected = st.checkbox(
             weekday_short_name[weekday],
-            value=False,
-            key=f"weekday_checkbox_{weekday}",
+            key=checkbox_key,
         )
 
     if is_selected:
@@ -2286,6 +3091,7 @@ with st.sidebar.expander("🚗 차량 조건", expanded=False):
     selected_wrngdo = st.multiselect(
         "가해차량 차종 (복수 선택)",
         wrngdo_options,
+        key="filter_offending_vehicle",
         placeholder="전체 (미선택 시)",
     )
 
@@ -2326,6 +3132,7 @@ with st.sidebar.expander("🚗 차량 조건", expanded=False):
     selected_dmge = st.multiselect(
         "피해차량 차종 (복수 선택)",
         dmge_options,
+        key="filter_damaged_vehicle",
         placeholder="전체 (미선택 시)",
     )
 
@@ -2369,6 +3176,7 @@ with st.sidebar.expander("🚨 사망사고 조건", expanded=False):
     selected_fatal_type = st.multiselect(
         "사망자 유형 (복수 선택)",
         fatal_type_options,
+        key="filter_fatal_type",
         placeholder="전체 (미선택 시)",
     )
 
@@ -2390,6 +3198,7 @@ with st.sidebar.expander("🚨 사망사고 조건", expanded=False):
     selected_fatal_age = st.multiselect(
         "사망자 연령대 (복수 선택)",
         fatal_age_options,
+        key="filter_fatal_age",
         placeholder="전체 (미선택 시)",
     )
 
@@ -2428,6 +3237,7 @@ with st.sidebar.expander("🌦️ 환경·원인 조건", expanded=False):
     selected_wether = st.multiselect(
         "날씨 (복수 선택)",
         wether_options,
+        key="filter_weather",
         placeholder="전체 (미선택 시)",
     )
 
@@ -2455,6 +3265,7 @@ with st.sidebar.expander("🌦️ 환경·원인 조건", expanded=False):
     selected_violt = st.multiselect(
         "법규위반유형 (복수 선택)",
         violt_options,
+        key="filter_violation",
         placeholder="전체 (미선택 시)",
     )
 
@@ -2757,78 +3568,160 @@ with kpi_col4:
     st.metric("중상사고", f"{serious_accident_count:,}건")
 
 
-
-if "hotspot_radius" not in st.session_state:
-    st.session_state.hotspot_radius = 100
-
-if "hotspot_top_n" not in st.session_state:
-    st.session_state.hotspot_top_n = 5
+# ============================================================
+# AI 자연어 조건검색
+# - KPI 바로 아래 배치
+# - 사용자의 문장을 기존 사이드바 검색조건으로 자동 변환
+# ============================================================
 
 st.markdown(
     """
     <div style="
-        font-size: 1.08rem;
-        color: #64748B;
-        margin-top: 10px;
-        margin-bottom: 10px;
-        line-height: 1.6;
+        margin-top: 14px;
+        margin-bottom: 4px;
+        font-size: 1.02rem;
+        font-weight: 700;
+        color: #1D4ED8;
     ">
-        <span style="
-            color: #1D4ED8;
-            font-weight: 700;
-        ">
-            🔎사고다발지점 탐색
-        </span>
-        <span>
-            : 입력한 반경(m)과 수에 따라, AI가 사고다발지역을 자동 탐색합니다.
-        </span>
+        ✨ AI 자연어 조건검색
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.form("hotspot_settings_form"):
-    hotspot_col1, hotspot_col2, hotspot_col3 = st.columns(
-        [1, 1, 0.7]
-    )
+with st.form(
+    "natural_language_filter_form",
+    clear_on_submit=False,
+):
+    nl_col1, nl_col2 = st.columns([6.5, 1.0])
 
-    with hotspot_col1:
-        radius_input = st.number_input(
-            "분석 반경 (m)",
-            min_value=50,
-            max_value=300,
-            value=int(st.session_state.hotspot_radius),
-            step=10,
-            format="%d",
+    with nl_col1:
+        natural_filter_query = st.text_input(
+            "원하는 교통사고 검색조건을 문장으로 입력하세요.",
+            key="natural_filter_query",
+            placeholder=(
+                "예: 최근 3년간 야간 보행자 사망사고를 찾아줘"
+            ),
+            label_visibility="collapsed",
         )
 
-    with hotspot_col2:
-        top_n_input = st.number_input(
-            "사고다발지역 수",
-            min_value=1,
-            max_value=10,
-            value=int(st.session_state.hotspot_top_n),
-            step=1,
-            format="%d",
-        )
-
-    with hotspot_col3:
-        # 입력창과 버튼의 세로 위치 맞춤
-        st.write("")
-        st.write("")
-
-        hotspot_apply = st.form_submit_button(
-            "설정 적용",
+    with nl_col2:
+        natural_filter_submit = st.form_submit_button(
+            "AI 조건검색",
             use_container_width=True,
         )
 
-# 적용 버튼을 눌렀을 때만 실제 설정값 변경
-if hotspot_apply:
-    st.session_state.hotspot_radius = int(radius_input)
-    st.session_state.hotspot_top_n = int(top_n_input)
+if natural_filter_submit:
+    if not natural_filter_query.strip():
+        st.warning("검색할 조건을 문장으로 입력해 주세요.")
+    else:
+        # 현재 화면에서 실제 선택 가능한 값만 AI에 제공
+        natural_filter_catalog = {
+            "stations": station_options,
+            "accident_severity": type_options,
+            "accident_types": hdc_options,
+            "weekdays": weekday_order,
+            "offending_vehicles": wrngdo_options,
+            "damaged_vehicles": dmge_options,
+            "fatal_types": fatal_type_options,
+            "fatal_age_groups": fatal_age_options,
+            "weather": wether_options,
+            "violations": violt_options,
+            "available_period": [
+                (
+                    f"{year_month_options[0].year}-"
+                    f"{year_month_options[0].month:02d}"
+                    if year_month_options
+                    else None
+                ),
+                (
+                    f"{year_month_options[-1].year}-"
+                    f"{year_month_options[-1].month:02d}"
+                    if year_month_options
+                    else None
+                ),
+            ],
+        }
 
-hotspot_radius = st.session_state.hotspot_radius
-hotspot_top_n = st.session_state.hotspot_top_n
+        try:
+            with st.spinner(
+                "입력한 문장에서 검색조건을 해석하고 있습니다."
+            ):
+                parsed_natural_filter = parse_natural_language_filters(
+                    natural_filter_query.strip(),
+                    natural_filter_catalog,
+                )
+
+            if (
+                parsed_natural_filter.get("status")
+                == "need_clarification"
+            ):
+                st.warning(
+                    parsed_natural_filter.get(
+                        "clarification_question",
+                        "검색조건이 정확하지 않습니다. 조금 더 구체적으로 입력해 주세요.",
+                    )
+                )
+
+                interpretation_text = parsed_natural_filter.get(
+                    "interpretation_summary",
+                    "",
+                )
+                if interpretation_text:
+                    st.caption(
+                        f"AI 해석: {interpretation_text}"
+                    )
+
+            else:
+                _queue_natural_language_filters(
+                    parsed_natural_filter,
+                    natural_filter_catalog,
+                )
+                st.rerun()
+
+        except Exception as error:
+            st.error(
+                "AI 자연어 조건검색 중 오류가 발생했습니다."
+            )
+            st.code(
+                f"{type(error).__name__}: {error}"
+            )
+
+last_natural_summary = st.session_state.get(
+    "natural_search_last_summary",
+    "",
+)
+if last_natural_summary:
+    st.caption(
+        f"최근 AI 검색 적용조건: {last_natural_summary}"
+    )
+
+if st.session_state.get(
+    "natural_search_hotspot_requested",
+    False,
+):
+    hotspot_info_parts = []
+
+    if "hotspot_radius" in st.session_state:
+        hotspot_info_parts.append(
+            f"반경 {int(st.session_state['hotspot_radius'])}m"
+        )
+
+    if "hotspot_top_n" in st.session_state:
+        hotspot_info_parts.append(
+            f"상위 {int(st.session_state['hotspot_top_n'])}개소"
+        )
+
+    hotspot_info_text = (
+        " / ".join(hotspot_info_parts)
+        if hotspot_info_parts
+        else "현재 사고다발지점 설정"
+    )
+
+    st.info(
+        "AI가 입력조건을 반영해 교통사고를 필터링하였습니다. "
+        f"{hotspot_info_text} 기준으로 GIS 분석 탭에서 결과를 확인하세요."
+    )
 
 
 # -----------------------------------
@@ -2863,6 +3756,81 @@ map_tab, stats_tab, ai_tab = st.tabs(
 
 with map_tab:
     st.subheader("🗺️ 교통사고 공간분석", anchor=False)
+
+    # ========================================================
+    # 사고다발지점 탐색 설정
+    # - GIS 분석 탭 내부에 배치
+    # - 레이어 선택 안내문보다 위에 표시
+    # ========================================================
+    if "hotspot_radius" not in st.session_state:
+        st.session_state.hotspot_radius = 100
+
+    if "hotspot_top_n" not in st.session_state:
+        st.session_state.hotspot_top_n = 5
+
+    st.markdown(
+        """
+        <div style="
+            font-size: 1.08rem;
+            color: #64748B;
+            margin-top: 10px;
+            margin-bottom: 10px;
+            line-height: 1.6;
+        ">
+            <span style="
+                color: #1D4ED8;
+                font-weight: 700;
+            ">
+                🔎사고다발지점 탐색
+            </span>
+            <span>
+                : 입력한 반경(m)과 수에 따라, AI가 사고다발지역을 자동 탐색합니다.
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("hotspot_settings_form"):
+        hotspot_col1, hotspot_col2, hotspot_col3 = st.columns(
+            [1, 1, 0.7]
+        )
+
+        with hotspot_col1:
+            radius_input = st.number_input(
+                "분석 반경 (m)",
+                min_value=50,
+                max_value=300,
+                value=int(st.session_state.hotspot_radius),
+                step=10,
+                format="%d",
+            )
+
+        with hotspot_col2:
+            top_n_input = st.number_input(
+                "사고다발지역 수",
+                min_value=1,
+                max_value=10,
+                value=int(st.session_state.hotspot_top_n),
+                step=1,
+                format="%d",
+            )
+
+        with hotspot_col3:
+            st.write("")
+            st.write("")
+
+            hotspot_apply = st.form_submit_button(
+                "설정 적용",
+                use_container_width=True,
+            )
+
+    if hotspot_apply:
+        st.session_state.hotspot_radius = int(radius_input)
+        st.session_state.hotspot_top_n = int(top_n_input)
+
+    hotspot_radius = st.session_state.hotspot_radius
+    hotspot_top_n = st.session_state.hotspot_top_n
 
     # -----------------------------------
     # 지도 위 사고다발지점 표시 설정

@@ -23,7 +23,7 @@ except ImportError:
 # 반드시 다른 Streamlit 명령보다 먼저 실행
 # -----------------------------------
 st.set_page_config(
-    page_title="Traffic Atlas AI",
+    page_title="TAAP - AI",
     page_icon="🗺️",
     layout="wide",
 )
@@ -37,17 +37,18 @@ st.title("🗺️ TAAP - AI")
 st.markdown(
     """
     <div style="
-        font-size: 1.3rem;
+        font-size: 1.15rem;
         color: #64748B;
         margin-top: -12px;
         margin-bottom: 16px;
-        margin-left: 100px;
-
-    교통사고 AI 분석 및 의사결정 지원 시스템
+        margin-left: 10px;
+    ">
+        교통사고 AI 분석 및 의사결정 지원시스템
     </div>
     """,
     unsafe_allow_html=True,
 )
+
 
 # ============================================================
 # 공통 UI 디자인
@@ -2176,7 +2177,7 @@ st.sidebar.markdown(
     "
     >
         ※ 자정을 포함한 검색 가능 (ex : 22시~06시)<br>
-        ※ '분'을 제거한 시각 검색 (ex : 7시15분 → 7시)
+        ※ 검색단위는 '분'을 제거한 시각 (ex : 7시15분 → 7시)
     </div>
     """,
     unsafe_allow_html=True,

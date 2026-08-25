@@ -4,6 +4,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+
 import numpy as np
 import pandas as pd
 import folium
@@ -1352,7 +1353,14 @@ ranked_locations 순서대로 작성하되 단순 통계 복사는 피한다.
 단순 참고문헌이 아니라 '보고서 작성 형식의 직접적인 모범자료'로 사용한다.
 소제목 중 '현황 및 문제점', '향후 계획'의 비중은 줄이고 '추진 방안'의 비율이 60% 이상이 되도록 조정한다.
 경찰은 집약된 보고서를 선호하므로, '현황 및 문제점'과 '향후 계획'에서 꼭 필요한 사항이 아니면 제외한다.
-보고서의 글자수는 공백을 포함하여 3,000자 이내로 한다. 
+보고서의 글자수는 공백을 포함하여 3,000자 이내로 한다.
+
+[개조식 계층 표기 원칙]
+- 1단계 항목은 반드시 'ㅁ'으로 시작하고 들여쓰기하지 않는다.
+- 2단계 항목은 반드시 'ㅇ'으로 시작하며 1칸 들여쓴다.
+- 3단계 항목은 반드시 '-'로 시작하며 2칸 들여쓴다.
+- 세부항목에 '*', '•', '·' 기호를 사용하지 않는다.
+- 계층은 'ㅁ → ㅇ → -' 순서로 통일한다.
 
 [기존 경찰 보고서 참고 원칙]
 
@@ -1470,6 +1478,7 @@ ranked_locations 순서대로 작성하되 단순 통계 복사는 피한다.
 [분석용 JSON]
 {analysis_json}
 """.strip()
+
 
 
 def _safe_usage_value(obj, name, default=0):
@@ -1898,6 +1907,56 @@ def generate_ai_report(analysis_package, report_type):
     display_text = display_text.replace("~", "∼")
 
     return display_text, analysis_json, usage_info
+
+def format_police_report_display(report_text):
+    """
+    AI 경찰보고서의 화면 표시용 개조식 계층을 강제 정규화한다.
+    1단계: ㅁ (들여쓰기 없음)
+    2단계: ㅇ (1칸 들여쓰기)
+    3단계: - (4칸 들여쓰기)
+
+    일반 공백은 Markdown에서 접힐 수 있으므로 NBSP를 사용해
+    화면에서도 들여쓰기가 확실히 보이도록 한다.
+    """
+    if not report_text:
+        return report_text
+
+    formatted_lines = []
+
+    for raw_line in str(report_text).splitlines():
+        stripped = raw_line.strip()
+
+        if not stripped:
+            formatted_lines.append("")
+            continue
+
+        # Markdown 제목(#, ##, ###)은 그대로 유지
+        if stripped.startswith("#"):
+            formatted_lines.append(raw_line)
+            continue
+
+        # 1단계: 네모 기호 - 들여쓰기 없음
+        if stripped.startswith(("ㅁ", "□", "■", "▪")):
+            content = stripped.lstrip("ㅁ□■▪ 	").strip()
+            formatted_lines.append(f"ㅁ {content}")
+            continue
+
+        # 2단계: 동그라미 - 1칸 들여쓰기
+        if stripped.startswith(("ㅇ", "○", "◦")):
+            content = stripped.lstrip("ㅇ○◦ 	").strip()
+            formatted_lines.append(f"&nbsp;ㅇ {content}")
+            continue
+
+        # 3단계: -, *, •, · 모두 '-'로 통일하고 4칸 들여쓰기
+        if stripped.startswith(("-", "*", "•", "·")):
+            content = stripped.lstrip("-*•· 	").strip()
+            formatted_lines.append(f"&nbsp;&nbsp;&nbsp;&nbsp;- {content}")
+            continue
+
+        # 모델이 기호를 빠뜨린 일반 문장은 원문 유지
+        formatted_lines.append(raw_line)
+
+    return "\n\n".join(formatted_lines)
 
 
 def make_filter_signature(selected_filter_info, target_df):
@@ -5025,7 +5084,13 @@ with ai_tab:
                 f"ai_result_{selected_ai_report_type}"
             ]
 
-            st.markdown(ai_display_text)
+            if selected_ai_report_type == "police_report":
+                st.markdown(
+                    format_police_report_display(ai_display_text),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(ai_display_text)
 
             st.caption(
                 "생성형 AI 결과는 의사결정 보조자료이며, "

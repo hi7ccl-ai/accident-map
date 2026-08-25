@@ -4,6 +4,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import re
 
 import numpy as np
 import pandas as pd
@@ -182,15 +183,18 @@ st.markdown(
 def load_data():
     df = pd.read_parquet("정제완료(21~25).parquet")
 
-    # 시간대 필터링용 정수형 변환
+    # 시간대 필터링용 숫자형 변환
+    # 결측/비정상 시간은 0시로 강제 치환하지 않고 NaN으로 유지
+    # → 0시가 포함된 검색에서 결측시간 사고가 잘못 포함되는 문제 방지
     if "occrrnc_time_dc" in df.columns:
         df["time_num"] = (
             df["occrrnc_time_dc"]
             .astype(str)
             .str.replace("시", "", regex=False)
         )
-        df["time_num"] = (
-            pd.to_numeric(df["time_num"], errors="coerce").fillna(0).astype(int)
+        df["time_num"] = pd.to_numeric(
+            df["time_num"],
+            errors="coerce",
         )
 
     return df
@@ -1044,6 +1048,11 @@ def make_ai_analysis_package(
                 "by_offending_vehicle": _distribution_dict(
                     target_df,
                     "wrngdo_vhcle_asort_dc",
+                    top_n=10,
+                ),
+                "by_offending_driver_age_group": _distribution_dict(
+                    target_df,
+                    "acdnt_age_1_dc",
                     top_n=10,
                 ),
                 "by_damaged_vehicle": _distribution_dict(
@@ -2059,6 +2068,10 @@ def parse_natural_language_filters(user_query, filter_catalog):
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "offending_driver_age_groups": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
             "damaged_vehicles": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -2106,6 +2119,7 @@ def parse_natural_language_filters(user_query, filter_catalog):
             "end_time",
             "weekdays",
             "offending_vehicles",
+            "offending_driver_age_groups",
             "damaged_vehicles",
             "fatal_types",
             "fatal_age_groups",
@@ -2194,7 +2208,19 @@ def parse_natural_language_filters(user_query, filter_catalog):
 
 13. 경찰 실무에서 사용하지 않는 사고분류 용어를 임의로 만들어내지 않는다.
 
-14. 사고다발지점 탐색조건
+14. 가해운전자 연령대 표현
+   - '고령'이라는 단어만으로는 절대 가해운전자 연령대를 설정하지 않는다.
+   - '고령운전자', '고령 운전자', '고령운전'처럼
+     '고령'과 '운전'이 직접 연결된 표현이 있는 경우에만
+     가해운전자 연령대를 '65세 이상'으로 해석한다.
+   - 즉 offending_driver_age_groups=["65세 이상"]으로 반환한다.
+   - '고령 보행자', '고령자', '고령 사망자' 등
+     '고령' 뒤에 '운전'이 직접 연결되지 않은 표현은
+     가해운전자 연령대로 해석하지 않는다.
+   - 사용자가 가해운전자 연령대를 직접 명시한 경우에는
+     실제 필터값 범위 안에서 해당 연령대를 offending_driver_age_groups에 반환한다.
+
+15. 사고다발지점 탐색조건
    - 사용자가 분석반경을 명시하면 hotspot_radius에 미터 단위 정수로 반환한다.
    - 예: '반경 150m', '150미터 반경', '분석반경 150미터'
      → hotspot_radius=150
@@ -2259,6 +2285,12 @@ def parse_natural_language_filters(user_query, filter_catalog):
     parsed_result = json.loads(output_text)
 
     parsed_result = _supplement_weather_from_query(
+        parsed_result=parsed_result,
+        user_query=user_query,
+        filter_catalog=filter_catalog,
+    )
+
+    parsed_result = _supplement_elderly_driver_from_query(
         parsed_result=parsed_result,
         user_query=user_query,
         filter_catalog=filter_catalog,
@@ -2383,6 +2415,63 @@ def _supplement_weather_from_query(
     return parsed_result
 
 
+def _supplement_elderly_driver_from_query(
+    parsed_result,
+    user_query,
+    filter_catalog,
+):
+    """
+    '고령' 관련 표현을 가해운전자 연령대로 오인하지 않도록 후처리한다.
+
+    적용:
+    - 고령운전자
+    - 고령 운전자
+    - 고령운전
+    - 고령 운전
+
+    미적용:
+    - 고령 보행자
+    - 고령자
+    - 고령 사망자
+    - 그 밖에 '고령'과 '운전'이 직접 연결되지 않은 표현
+    """
+    query = str(user_query).strip()
+
+    if not query:
+        return parsed_result
+
+    # '고령' 다음에 공백이 있거나 없거나 바로 '운전'이 이어지는 경우만 인정
+    is_elderly_driver_query = bool(
+        re.search(r"고령\s*운전", query)
+    )
+
+    # GPT가 '고령'만 보고 가해운전자 연령대를 잘못 넣었더라도,
+    # 실제 문장에 '고령 + 운전' 표현이 없으면 강제로 제거
+    if "고령" in query and not is_elderly_driver_query:
+        parsed_result["offending_driver_age_groups"] = []
+        return parsed_result
+
+    # '고령 + 운전' 표현이 없으면 다른 명시적 연령조건은 건드리지 않음
+    if not is_elderly_driver_query:
+        return parsed_result
+
+    allowed_age_groups = {
+        str(value)
+        for value in filter_catalog.get(
+            "offending_driver_age_groups",
+            [],
+        )
+    }
+
+    if "65세 이상" not in allowed_age_groups:
+        return parsed_result
+
+    parsed_result["offending_driver_age_groups"] = [
+        "65세 이상"
+    ]
+
+    return parsed_result
+
 def _validated_list(values, allowed_values):
     """AI가 반환한 배열을 현재 실제 필터값 범위 안으로 제한한다."""
     allowed = {str(value) for value in allowed_values}
@@ -2428,6 +2517,10 @@ def _queue_natural_language_filters(parsed_result, filter_catalog):
         "offending_vehicles": _validated_list(
             parsed_result.get("offending_vehicles", []),
             filter_catalog["offending_vehicles"],
+        ),
+        "offending_driver_age_groups": _validated_list(
+            parsed_result.get("offending_driver_age_groups", []),
+            filter_catalog["offending_driver_age_groups"],
         ),
         "damaged_vehicles": _validated_list(
             parsed_result.get("damaged_vehicles", []),
@@ -2495,6 +2588,7 @@ def _apply_pending_natural_filter_state():
         "start_time",
         "end_time",
         "filter_offending_vehicle",
+        "filter_offending_driver_age",
         "filter_damaged_vehicle",
         "filter_fatal_type",
         "filter_fatal_age",
@@ -2528,6 +2622,7 @@ def _apply_pending_natural_filter_state():
     st.session_state["start_time"] = 0
     st.session_state["end_time"] = 23
     st.session_state["filter_offending_vehicle"] = []
+    st.session_state["filter_offending_driver_age"] = []
     st.session_state["filter_damaged_vehicle"] = []
     st.session_state["filter_fatal_type"] = []
     st.session_state["filter_fatal_age"] = []
@@ -2585,6 +2680,10 @@ def _apply_pending_natural_filter_state():
 
     st.session_state["filter_offending_vehicle"] = pending.get(
         "offending_vehicles",
+        [],
+    )
+    st.session_state["filter_offending_driver_age"] = pending.get(
+        "offending_driver_age_groups",
         [],
     )
     st.session_state["filter_damaged_vehicle"] = pending.get(
@@ -2751,9 +2850,9 @@ selected_ps = st.sidebar.selectbox(
 
 # -----------------------------------
 # [순서 2] 발생 연월 선택
-# - 자연어 검색 결과와 사이드바 범위 슬라이더 연동
-# - Session State만 사용
-# - value= 와 Session State의 중복 지정 방지
+# - 범위 슬라이더는 value=(시작월, 종료월)을 명시해야
+#   Streamlit이 안정적으로 범위 모드로 생성됨
+# - 자연어 검색 기간도 동일 위젯에 안전하게 반영
 # -----------------------------------
 
 df["accident_date"] = pd.to_datetime(
@@ -2776,12 +2875,17 @@ sidebar_filter_title("발생연월", margin_bottom=14)
 start_year_month = None
 end_year_month = None
 
-
 if year_month_options:
+
+    # 기본값은 전체 데이터 기간
+    period_default_range = (
+        year_month_options[0],
+        year_month_options[-1],
+    )
 
     # ========================================================
     # 1. 자연어 검색에서 전달된 기간이 있으면
-    #    위젯이 생성되기 전에 Session State에 반영
+    #    이번 위젯 생성의 기본 범위로 사용
     # ========================================================
     pending_period = st.session_state.pop(
         "_pending_natural_period",
@@ -2789,11 +2893,9 @@ if year_month_options:
     )
 
     if pending_period is not None:
-
         period_start_text = pending_period.get("start")
         period_end_text = pending_period.get("end")
 
-        # 시작월 변환
         try:
             natural_start_period = (
                 pd.Period(period_start_text, freq="M")
@@ -2803,7 +2905,6 @@ if year_month_options:
         except Exception:
             natural_start_period = year_month_options[0]
 
-        # 종료월 변환
         try:
             natural_end_period = (
                 pd.Period(period_end_text, freq="M")
@@ -2813,83 +2914,75 @@ if year_month_options:
         except Exception:
             natural_end_period = year_month_options[-1]
 
-        # ----------------------------------------------------
-        # 실제 데이터 범위를 벗어나지 않도록 제한
-        # ----------------------------------------------------
+        # 실제 전체 데이터 범위를 벗어나지 않도록 제한
         natural_start_period = max(
             year_month_options[0],
-            min(
-                natural_start_period,
-                year_month_options[-1],
-            ),
+            min(natural_start_period, year_month_options[-1]),
         )
-
         natural_end_period = max(
             year_month_options[0],
-            min(
-                natural_end_period,
-                year_month_options[-1],
-            ),
+            min(natural_end_period, year_month_options[-1]),
         )
 
-        # 시작월과 종료월이 뒤집힌 경우 교정
         if natural_start_period > natural_end_period:
             natural_start_period, natural_end_period = (
                 natural_end_period,
                 natural_start_period,
             )
 
-        st.session_state["filter_year_month"] = (
+        # select_slider의 options에는 실제 존재하는 월만 들어가므로,
+        # 요청 월이 목록에 없으면 가장 가까운 실제 월로 보정
+        def _nearest_available_period(target_period):
+            return min(
+                year_month_options,
+                key=lambda option: abs(option.ordinal - target_period.ordinal),
+            )
+
+        natural_start_period = _nearest_available_period(
+            natural_start_period
+        )
+        natural_end_period = _nearest_available_period(
+            natural_end_period
+        )
+
+        period_default_range = (
             natural_start_period,
             natural_end_period,
         )
 
+        # 자연어 검색은 기존 수동 슬라이더 상태를 덮어써야 하므로 제거
+        st.session_state.pop("filter_year_month", None)
 
     # ========================================================
-    # 2. 최초 실행 시 기본 기간 설정
-    #    전체 데이터 기간
-    # ========================================================
-    if "filter_year_month" not in st.session_state:
-        st.session_state["filter_year_month"] = (
-            year_month_options[0],
-            year_month_options[-1],
-        )
-
-
-    # ========================================================
-    # 3. 기존 Session State 값 안전성 검사
-    #
-    # 예전 오류로 Period 단일값이 들어가 있거나
-    # 잘못된 자료형이 남아 있어도 자동 복구
+    # 2. 기존 위젯 상태 안전성 검사
+    # - 단일값/잘못된 자료형/현재 options에 없는 값이면 초기화
     # ========================================================
     current_period_value = st.session_state.get(
         "filter_year_month"
     )
 
-    is_valid_range = (
-        isinstance(current_period_value, (tuple, list))
-        and len(current_period_value) == 2
-        and current_period_value[0] in year_month_options
-        and current_period_value[1] in year_month_options
-    )
-
-    if not is_valid_range:
-        st.session_state["filter_year_month"] = (
-            year_month_options[0],
-            year_month_options[-1],
+    if current_period_value is not None:
+        is_valid_range = (
+            isinstance(current_period_value, (tuple, list))
+            and len(current_period_value) == 2
+            and current_period_value[0] in year_month_options
+            and current_period_value[1] in year_month_options
         )
 
+        if not is_valid_range:
+            st.session_state.pop("filter_year_month", None)
 
     # ========================================================
-    # 4. 발생연월 범위 슬라이더
+    # 3. 발생연월 범위 슬라이더
     #
-    # 중요:
-    # Session State에 이미 값이 있으므로
-    # 여기서는 value= 를 절대 사용하지 않음
+    # 핵심:
+    # value에 2개 값을 명시하여 처음부터 '범위 슬라이더'로 생성
+    # 기존 정상 Session State가 있으면 Streamlit이 현재 선택값을 유지
     # ========================================================
     selected_year_month_range = st.sidebar.select_slider(
         "발생연월 범위",
         options=year_month_options,
+        value=period_default_range,
         key="filter_year_month",
         format_func=lambda value: (
             f"{value.year}년 {value.month}월"
@@ -2897,9 +2990,8 @@ if year_month_options:
         label_visibility="collapsed",
     )
 
-
     # ========================================================
-    # 5. 반환값을 시작월·종료월로 분리
+    # 4. 반환값을 시작월·종료월로 분리
     # ========================================================
     if (
         isinstance(selected_year_month_range, (tuple, list))
@@ -2907,9 +2999,8 @@ if year_month_options:
     ):
         start_year_month = selected_year_month_range[0]
         end_year_month = selected_year_month_range[1]
-
     else:
-        # 예상치 못한 단일값 반환 시 안전 처리
+        # 방어적 처리
         start_year_month = selected_year_month_range
         end_year_month = selected_year_month_range
 
@@ -2941,7 +3032,10 @@ if "acdnt_gae_dc" in df.columns:
 else:
     type_options = []
 
-sidebar_filter_title("사고분류 (복수선택)", margin_bottom=14)
+sidebar_filter_title(
+    "부상정도 <span style='font-weight:400;'>(복수선택)</span>",
+    margin_bottom=14,
+)
 
 selected_types = st.sidebar.multiselect(
     "사고분류 (복수 선택)",
@@ -3155,6 +3249,65 @@ with st.sidebar.expander("🚗 차량 조건", expanded=False):
     )
 
     # -----------------------------------
+    # 가해운전자 연령대 선택
+    # acdnt_age_1_dc 컬럼값 사용
+    # - 기본 연령구간은 낮은 연령부터 정렬
+    # - 그 외 실제 데이터값이 있으면 뒤에 추가
+    # -----------------------------------
+    offending_driver_age_order = [
+        "20세 이하",
+        "21-30세",
+        "31-40세",
+        "41-50세",
+        "51-60세",
+        "61-64세",
+        "65세 이상",
+    ]
+
+    if "acdnt_age_1_dc" in df.columns:
+        offending_driver_age_values = (
+            df["acdnt_age_1_dc"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+
+        offending_driver_age_values = set(
+            offending_driver_age_values[
+                (offending_driver_age_values != "")
+                & (
+                    offending_driver_age_values
+                    .str.lower()
+                    .ne("nan")
+                )
+            ].unique()
+        )
+
+        offending_driver_age_options = [
+            age_group
+            for age_group in offending_driver_age_order
+            if age_group in offending_driver_age_values
+        ]
+
+        # 정해진 기본 순서에 없는 값도 실제 데이터에 존재하면 누락하지 않음
+        extra_age_values = sorted(
+            offending_driver_age_values
+            - set(offending_driver_age_order)
+        )
+        offending_driver_age_options.extend(
+            extra_age_values
+        )
+    else:
+        offending_driver_age_options = []
+
+    selected_offending_driver_age = st.multiselect(
+        "가해운전자 연령대 (복수 선택)",
+        offending_driver_age_options,
+        key="filter_offending_driver_age",
+        placeholder="전체 (미선택 시)",
+    )
+
+    # -----------------------------------
     # [순서 7] 피해차량 차종 선택
     # 보행자 → 승용 → 승합 → 화물 → 이륜 →
     # 원동기 → ATV → 자전거 → PM
@@ -3329,10 +3482,109 @@ with st.sidebar.expander("🌦️ 환경·원인 조건", expanded=False):
     )
 
 
+# ============================================================
+# 필터 초기화
+# - st.session_state.clear()를 사용하지 않고 필터 관련 키만
+#   명시적으로 기본값으로 되돌린다.
+# - 버튼 on_click 콜백은 다음 화면 렌더링 전에 실행되므로
+#   이미 생성된 위젯 상태와 충돌하지 않는다.
+# ============================================================
+def reset_all_filters():
+    """사이드바 필터와 자연어 검색조건을 기본값으로 초기화"""
+
+    # --------------------------------------------------------
+    # 핵심 필터
+    # --------------------------------------------------------
+    st.session_state["filter_station"] = "전체"
+
+    if year_month_options:
+        st.session_state["filter_year_month"] = (
+            year_month_options[0],
+            year_month_options[-1],
+        )
+    else:
+        st.session_state.pop("filter_year_month", None)
+
+    st.session_state["filter_severity"] = []
+    st.session_state["filter_accident_type"] = "전체"
+
+    st.session_state["start_time"] = 0
+    st.session_state["end_time"] = 23
+
+    # --------------------------------------------------------
+    # 발생요일
+    # --------------------------------------------------------
+    for weekday in [
+        "월요일",
+        "화요일",
+        "수요일",
+        "목요일",
+        "금요일",
+        "토요일",
+        "일요일",
+    ]:
+        st.session_state[
+            f"weekday_checkbox_{weekday}"
+        ] = False
+
+    # --------------------------------------------------------
+    # 차량 조건
+    # --------------------------------------------------------
+    st.session_state["filter_offending_vehicle"] = []
+    st.session_state["filter_offending_driver_age"] = []
+    st.session_state["filter_damaged_vehicle"] = []
+
+    # --------------------------------------------------------
+    # 사망사고 조건
+    # --------------------------------------------------------
+    st.session_state["filter_fatal_type"] = []
+    st.session_state["filter_fatal_age"] = []
+
+    # --------------------------------------------------------
+    # 환경·원인 조건
+    # --------------------------------------------------------
+    st.session_state["filter_weather"] = []
+    st.session_state["filter_violation"] = []
+
+    # --------------------------------------------------------
+    # 사고다발지점 설정
+    # --------------------------------------------------------
+    st.session_state["hotspot_radius"] = 100
+    st.session_state["hotspot_top_n"] = 5
+    st.session_state.pop(
+        "natural_search_hotspot_requested",
+        None,
+    )
+
+    # --------------------------------------------------------
+    # 자연어 검색 관련 잔여 상태 제거
+    # 이전 자연어 조건이 다음 rerun에서 다시 적용되는 것을 방지
+    # --------------------------------------------------------
+    st.session_state.pop(
+        "_pending_natural_filters",
+        None,
+    )
+    st.session_state.pop(
+        "_pending_natural_period",
+        None,
+    )
+    st.session_state.pop(
+        "natural_search_last_summary",
+        None,
+    )
+    st.session_state.pop(
+        "natural_filter_query",
+        None,
+    )
+
+
 st.sidebar.divider()
-if st.sidebar.button("↺ 필터 초기화", use_container_width=True):
-    st.session_state.clear()
-    st.rerun()
+
+st.sidebar.button(
+    "↺ 필터 초기화",
+    use_container_width=True,
+    on_click=reset_all_filters,
+)
 
 # -----------------------------------
 # 3. 데이터 동적 필터링 처리
@@ -3460,7 +3712,24 @@ if (
         )
     ]
 
-# [필터 7] 피해차량 차종
+# [필터 7] 가해운전자 연령대
+if (
+    selected_offending_driver_age
+    and "acdnt_age_1_dc" in filtered_df.columns
+):
+    offending_driver_age_series = (
+        filtered_df["acdnt_age_1_dc"]
+        .astype(str)
+        .str.strip()
+    )
+
+    filtered_df = filtered_df[
+        offending_driver_age_series.isin(
+            selected_offending_driver_age
+        )
+    ]
+
+# [필터 8] 피해차량 차종
 if (
     selected_dmge
     and "dmge_vhcle_asort_dc" in filtered_df.columns
@@ -3471,7 +3740,7 @@ if (
         )
     ]
 
-# [필터 8] 사망자 유형
+# [필터 9] 사망자 유형
 if selected_fatal_type and "fatal_type" in filtered_df.columns:
     filtered_df = filtered_df[
         filtered_df["fatal_type"].isin(
@@ -3479,7 +3748,7 @@ if selected_fatal_type and "fatal_type" in filtered_df.columns:
         )
     ]
 
-# [필터 9] 사망자 연령대
+# [필터 10] 사망자 연령대
 if (
     selected_fatal_age
     and "fatal_age_group" in filtered_df.columns
@@ -3490,7 +3759,7 @@ if (
         )
     ]
 
-# [필터 10] 날씨
+# [필터 11] 날씨
 if (
     selected_wether
     and "wether_sttus_dc" in filtered_df.columns
@@ -3501,7 +3770,7 @@ if (
         )
     ]
 
-# [필터 11] 법규위반유형
+# [필터 12] 법규위반유형
 if (
     selected_violt
     and "lrg_violt_1_dc" in filtered_df.columns
@@ -3681,6 +3950,7 @@ if natural_filter_submit:
             "accident_types": hdc_options,
             "weekdays": weekday_order,
             "offending_vehicles": wrngdo_options,
+            "offending_driver_age_groups": offending_driver_age_options,
             "damaged_vehicles": dmge_options,
             "fatal_types": fatal_type_options,
             "fatal_age_groups": fatal_age_options,
@@ -4754,6 +5024,11 @@ with ai_tab:
             else ["전체"]
         ),
         "offending_vehicle": selected_wrngdo if selected_wrngdo else ["전체"],
+        "offending_driver_age_group": (
+            selected_offending_driver_age
+            if selected_offending_driver_age
+            else ["전체"]
+        ),
         "damaged_vehicle": selected_dmge if selected_dmge else ["전체"],
         "fatal_type": selected_fatal_type if selected_fatal_type else ["전체"],
         "fatal_age_group": selected_fatal_age if selected_fatal_age else ["전체"],

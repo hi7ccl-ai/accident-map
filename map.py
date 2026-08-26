@@ -5242,10 +5242,13 @@ with ai_tab:
         """
         AI 보고서 버튼 클릭 콜백
 
-        - 화면에서 선택된 버튼을 즉시 표시하기 위한 상태
-        - 실제 AI 생성을 위한 대기 상태
-        를 동시에 저장한다.
+        - 클릭한 보고서 유형을 현재 선택 상태로 저장
+        - 실제 AI 생성을 pending 상태로 저장
+        - 기존 결과 선택창 상태와는 직접 연결하지 않음
+
+        생성 완료 후 별도 rerun으로 새 보고서를 확정 표시한다.
         """
+
         st.session_state["selected_ai_report_type"] = report_type
         st.session_state["pending_ai_report_type"] = report_type
 
@@ -5297,6 +5300,14 @@ with ai_tab:
     # → Streamlit 재실행 시 같은 API가 자동으로 재호출되는 것을 방지
     # ============================================================
 
+    # ------------------------------------------------------------
+    # 기존 생성 결과 선택창 버전
+    # - 새 AI 보고서 생성 시마다 key를 변경해 오래된 브라우저 위젯 상태와 분리
+    # ------------------------------------------------------------
+    if "existing_report_selector_version" not in st.session_state:
+        st.session_state["existing_report_selector_version"] = 0
+
+
     clicked_report_type = st.session_state.pop(
         "pending_ai_report_type",
         None,
@@ -5306,6 +5317,7 @@ with ai_tab:
     if clicked_report_type is not None:
 
         report_info = ai_report_types[clicked_report_type]
+        report_generation_succeeded = False
 
         try:
 
@@ -5335,6 +5347,28 @@ with ai_tab:
                 f"ai_filters_{clicked_report_type}"
             ] = selected_filter_info
 
+            # ----------------------------------------------------
+            # 방금 생성한 보고서를 최우선 표시 대상으로 확정
+            # ----------------------------------------------------
+            st.session_state["selected_ai_report_type"] = (
+                clicked_report_type
+            )
+
+            # ----------------------------------------------------
+            # 기존 생성 결과 selectbox를 새 key로 재생성
+            # - 긴 AI 호출 중 브라우저에 남아 있던 이전 선택값과 분리
+            # ----------------------------------------------------
+            st.session_state["existing_report_selector_version"] = (
+                int(
+                    st.session_state.get(
+                        "existing_report_selector_version",
+                        0,
+                    )
+                )
+                + 1
+            )
+
+            report_generation_succeeded = True
 
         except Exception as error:
 
@@ -5350,6 +5384,14 @@ with ai_tab:
             st.code(
                 f"{type(error).__name__}: {error}"
             )
+
+        # --------------------------------------------------------
+        # 생성 완료 후 새 Session State로 다시 렌더링
+        # - try/except 밖에서 호출하여 Streamlit rerun 제어 예외와 충돌 방지
+        # - 같은 실행 사이클에서 오래된 selectbox 상태가 재적용되는 것을 방지
+        # --------------------------------------------------------
+        if report_generation_succeeded:
+            st.rerun()
     # ------------------------------------------------------------
     # 생성된 AI 결과 표시
     # ------------------------------------------------------------
@@ -5505,24 +5547,65 @@ with ai_tab:
             )
 
 
-        # 이미 생성한 다른 유형의 결과를 API 재호출 없이 열람
+        # ============================================================
+        # 이미 생성한 다른 유형의 결과 열람
+        # - 새 보고서 생성 때마다 selectbox key를 새로 만들어
+        #   브라우저에 남은 과거 선택 상태가 현재 보고서를 덮어쓰지 못하도록 함
+        # ============================================================
         available_report_types = [
             report_type
             for report_type in ai_report_types
-            if st.session_state.get(f"ai_result_{report_type}")
+            if st.session_state.get(
+                f"ai_result_{report_type}"
+            )
         ]
 
         if len(available_report_types) > 1:
+
+            current_selected_type = st.session_state.get(
+                "selected_ai_report_type"
+            )
+
+            if current_selected_type not in available_report_types:
+                current_selected_type = available_report_types[0]
+                st.session_state[
+                    "selected_ai_report_type"
+                ] = current_selected_type
+
+            selector_version = int(
+                st.session_state.get(
+                    "existing_report_selector_version",
+                    0,
+                )
+            )
+
+            selector_key = (
+                f"existing_ai_report_selector_{selector_version}"
+            )
+
+            default_index = available_report_types.index(
+                current_selected_type
+            )
+
             selected_existing_type = st.selectbox(
                 "기존 생성 결과 보기",
                 options=available_report_types,
-                index=available_report_types.index(selected_ai_report_type),
-                format_func=lambda value: ai_report_types[value]["button"],
-                key="existing_ai_report_selector",
+                index=default_index,
+                format_func=lambda value: (
+                    ai_report_types[value]["button"]
+                ),
+                key=selector_key,
             )
 
-            if selected_existing_type != selected_ai_report_type:
-                st.session_state["selected_ai_report_type"] = selected_existing_type
+            if (
+                selected_existing_type
+                != st.session_state.get(
+                    "selected_ai_report_type"
+                )
+            ):
+                st.session_state[
+                    "selected_ai_report_type"
+                ] = selected_existing_type
                 st.rerun()
 
 with stats_tab:

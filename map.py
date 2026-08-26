@@ -1919,18 +1919,24 @@ def generate_ai_report(analysis_package, report_type):
 
 def format_police_report_display(report_text):
     """
-    AI 경찰보고서의 화면 표시용 개조식 계층을 강제 정규화한다.
-    1단계: ㅁ (들여쓰기 없음)
-    2단계: ㅇ (1칸 들여쓰기)
-    3단계: - (4칸 들여쓰기)
+    AI 경찰보고서의 화면 표시용 형식을 정규화한다.
 
-    일반 공백은 Markdown에서 접힐 수 있으므로 NBSP를 사용해
-    화면에서도 들여쓰기가 확실히 보이도록 한다.
+    - 보고서 제목: 크게 표시
+    - 1단계(ㅁ): 소제목으로 강조
+    - 2단계(ㅇ): 1칸 들여쓰기
+    - 3단계(-): 4칸 들여쓰기
+
+    AI 보고서는 unsafe_allow_html=True로 표시하므로 Markdown 제목을
+    HTML 요소로 직접 변환하여 Streamlit Cloud에서도 크기가 확실히 적용되도록 한다.
     """
     if not report_text:
         return report_text
 
+    import html
+
     formatted_lines = []
+    first_content_seen = False
+    section_seen = False
 
     for raw_line in str(report_text).splitlines():
         stripped = raw_line.strip()
@@ -1939,33 +1945,74 @@ def format_police_report_display(report_text):
             formatted_lines.append("")
             continue
 
-        # Markdown 제목(#, ##, ###)은 그대로 유지
-        if stripped.startswith("#"):
-            formatted_lines.append(raw_line)
+        # Markdown 제목을 HTML 제목 클래스로 변환
+        if stripped.startswith("### "):
+            content = html.escape(stripped[4:].strip())
+            formatted_lines.append(
+                f'<div class="police-report-subtitle">{content}</div>'
+            )
+            first_content_seen = True
             continue
 
-        # 1단계: 네모 기호 - 들여쓰기 없음
+        if stripped.startswith("## "):
+            content = html.escape(stripped[3:].strip())
+            formatted_lines.append(
+                f'<div class="police-report-title">{content}</div>'
+            )
+            first_content_seen = True
+            continue
+
+        if stripped.startswith("# "):
+            content = html.escape(stripped[2:].strip())
+            formatted_lines.append(
+                f'<div class="police-report-title">{content}</div>'
+            )
+            first_content_seen = True
+            continue
+
+        # 1단계: ㅁ 항목은 보고서의 주요 소제목으로 강조
         if stripped.startswith(("ㅁ", "□", "■", "▪")):
-            content = stripped.lstrip("ㅁ□■▪ 	").strip()
-            formatted_lines.append(f"ㅁ {content}")
+            content = stripped.lstrip("ㅁ□■▪ \t").strip()
+            formatted_lines.append(
+                f'<div class="police-report-subtitle">ㅁ {html.escape(content)}</div>'
+            )
+            first_content_seen = True
+            section_seen = True
             continue
 
         # 2단계: 동그라미 - 1칸 들여쓰기
         if stripped.startswith(("ㅇ", "○", "◦")):
-            content = stripped.lstrip("ㅇ○◦ 	").strip()
-            formatted_lines.append(f"&nbsp;ㅇ {content}")
+            content = stripped.lstrip("ㅇ○◦ \t").strip()
+            formatted_lines.append(
+                f'<div class="police-report-level2">ㅇ {html.escape(content)}</div>'
+            )
+            first_content_seen = True
             continue
 
         # 3단계: -, *, •, · 모두 '-'로 통일하고 4칸 들여쓰기
         if stripped.startswith(("-", "*", "•", "·")):
-            content = stripped.lstrip("-*•· 	").strip()
-            formatted_lines.append(f"&nbsp;&nbsp;&nbsp;&nbsp;- {content}")
+            content = stripped.lstrip("-*•· \t").strip()
+            formatted_lines.append(
+                f'<div class="police-report-level3">- {html.escape(content)}</div>'
+            )
+            first_content_seen = True
             continue
 
-        # 모델이 기호를 빠뜨린 일반 문장은 원문 유지
-        formatted_lines.append(raw_line)
+        # 첫 일반 문장이 ㅁ 항목보다 앞에 있으면 보고서 제목으로 처리
+        if not first_content_seen and not section_seen:
+            formatted_lines.append(
+                f'<div class="police-report-title">{html.escape(stripped)}</div>'
+            )
+            first_content_seen = True
+            continue
 
-    return "\n\n".join(formatted_lines)
+        # 그 밖의 일반 문장은 본문으로 표시
+        formatted_lines.append(
+            f'<div class="police-report-body">{html.escape(stripped)}</div>'
+        )
+        first_content_seen = True
+
+    return "\n".join(formatted_lines)
 
 
 def make_filter_signature(selected_filter_info, target_df):
@@ -2582,7 +2629,6 @@ def _apply_pending_natural_filter_state():
     # 위젯이 생성되기 전에 이전 상태를 제거
     filter_keys = [
         "filter_station",
-        "filter_year_month",
         "filter_severity",
         "filter_accident_type",
         "start_time",
@@ -2850,9 +2896,9 @@ selected_ps = st.sidebar.selectbox(
 
 # -----------------------------------
 # [순서 2] 발생 연월 선택
-# - 범위 슬라이더는 value=(시작월, 종료월)을 명시해야
-#   Streamlit이 안정적으로 범위 모드로 생성됨
-# - 자연어 검색 기간도 동일 위젯에 안전하게 반영
+# - AI 자연어 검색 시에만 슬라이더 위젯을 새 key로 재생성
+# - 평상시에는 같은 key를 유지하여 사용자의 마우스 조작값을 그대로 보존
+# - 실제 필터는 select_slider의 반환값을 직접 사용
 # -----------------------------------
 
 df["accident_date"] = pd.to_datetime(
@@ -2877,15 +2923,21 @@ end_year_month = None
 
 if year_month_options:
 
-    # 기본값은 전체 데이터 기간
-    period_default_range = (
-        year_month_options[0],
-        year_month_options[-1],
-    )
+    # ========================================================
+    # 1. 슬라이더 세대(version) 및 기본범위 초기화
+    # ========================================================
+    if "year_month_slider_version" not in st.session_state:
+        st.session_state["year_month_slider_version"] = 0
+
+    if "year_month_slider_default" not in st.session_state:
+        st.session_state["year_month_slider_default"] = (
+            year_month_options[0],
+            year_month_options[-1],
+        )
 
     # ========================================================
-    # 1. 자연어 검색에서 전달된 기간이 있으면
-    #    이번 위젯 생성의 기본 범위로 사용
+    # 2. 자연어 검색에서 전달된 기간 확인
+    #    → 이때만 slider version을 증가시켜 새 위젯 생성
     # ========================================================
     pending_period = st.session_state.pop(
         "_pending_natural_period",
@@ -2914,7 +2966,7 @@ if year_month_options:
         except Exception:
             natural_end_period = year_month_options[-1]
 
-        # 실제 전체 데이터 범위를 벗어나지 않도록 제한
+        # 실제 데이터 범위를 벗어나지 않도록 제한
         natural_start_period = max(
             year_month_options[0],
             min(natural_start_period, year_month_options[-1]),
@@ -2930,12 +2982,13 @@ if year_month_options:
                 natural_start_period,
             )
 
-        # select_slider의 options에는 실제 존재하는 월만 들어가므로,
-        # 요청 월이 목록에 없으면 가장 가까운 실제 월로 보정
+        # 실제 options에 없는 월은 가장 가까운 월로 보정
         def _nearest_available_period(target_period):
             return min(
                 year_month_options,
-                key=lambda option: abs(option.ordinal - target_period.ordinal),
+                key=lambda option: abs(
+                    option.ordinal - target_period.ordinal
+                ),
             )
 
         natural_start_period = _nearest_available_period(
@@ -2945,45 +2998,56 @@ if year_month_options:
             natural_end_period
         )
 
-        period_default_range = (
+        # AI가 지정한 범위를 다음 슬라이더의 기본값으로 저장
+        st.session_state["year_month_slider_default"] = (
             natural_start_period,
             natural_end_period,
         )
 
-        # 자연어 검색은 기존 수동 슬라이더 상태를 덮어써야 하므로 제거
-        st.session_state.pop("filter_year_month", None)
+        # 핵심: 새 key를 쓰도록 세대 증가
+        st.session_state["year_month_slider_version"] += 1
 
     # ========================================================
-    # 2. 기존 위젯 상태 안전성 검사
-    # - 단일값/잘못된 자료형/현재 options에 없는 값이면 초기화
+    # 3. 현재 기본값 안전성 검사
     # ========================================================
-    current_period_value = st.session_state.get(
-        "filter_year_month"
+    slider_default = st.session_state.get(
+        "year_month_slider_default",
+        (
+            year_month_options[0],
+            year_month_options[-1],
+        ),
     )
 
-    if current_period_value is not None:
-        is_valid_range = (
-            isinstance(current_period_value, (tuple, list))
-            and len(current_period_value) == 2
-            and current_period_value[0] in year_month_options
-            and current_period_value[1] in year_month_options
+    default_is_valid = (
+        isinstance(slider_default, (tuple, list))
+        and len(slider_default) == 2
+        and slider_default[0] in year_month_options
+        and slider_default[1] in year_month_options
+    )
+
+    if not default_is_valid:
+        slider_default = (
+            year_month_options[0],
+            year_month_options[-1],
         )
-
-        if not is_valid_range:
-            st.session_state.pop("filter_year_month", None)
+        st.session_state["year_month_slider_default"] = slider_default
 
     # ========================================================
-    # 3. 발생연월 범위 슬라이더
+    # 4. 발생연월 범위 슬라이더
     #
-    # 핵심:
-    # value에 2개 값을 명시하여 처음부터 '범위 슬라이더'로 생성
-    # 기존 정상 Session State가 있으면 Streamlit이 현재 선택값을 유지
+    # - AI 검색 직후: version 증가 → 새 key → AI 범위로 생성
+    # - 사용자가 마우스로 변경: version 유지 → 같은 위젯 state 유지
     # ========================================================
+    slider_version = int(
+        st.session_state["year_month_slider_version"]
+    )
+    slider_key = f"filter_year_month_slider_{slider_version}"
+
     selected_year_month_range = st.sidebar.select_slider(
         "발생연월 범위",
         options=year_month_options,
-        value=period_default_range,
-        key="filter_year_month",
+        value=tuple(slider_default),
+        key=slider_key,
         format_func=lambda value: (
             f"{value.year}년 {value.month}월"
         ),
@@ -2991,7 +3055,7 @@ if year_month_options:
     )
 
     # ========================================================
-    # 4. 반환값을 시작월·종료월로 분리
+    # 5. 슬라이더 반환값을 실제 필터에 직접 사용
     # ========================================================
     if (
         isinstance(selected_year_month_range, (tuple, list))
@@ -3003,6 +3067,14 @@ if year_month_options:
         # 방어적 처리
         start_year_month = selected_year_month_range
         end_year_month = selected_year_month_range
+
+    # 현재 선택범위를 다음 재실행의 기본값으로 저장
+    # 같은 key가 존재하는 동안에는 widget state가 우선하므로
+    # 사용자의 마우스 조작을 덮어쓰지 않는다.
+    st.session_state["year_month_slider_default"] = (
+        start_year_month,
+        end_year_month,
+    )
 
 # -----------------------------------
 # [순서 3] 사고분류 선택
@@ -3498,12 +3570,29 @@ def reset_all_filters():
     st.session_state["filter_station"] = "전체"
 
     if year_month_options:
-        st.session_state["filter_year_month"] = (
+        default_year_month_range = (
             year_month_options[0],
             year_month_options[-1],
         )
+
+        st.session_state["year_month_slider_default"] = (
+            default_year_month_range
+        )
+
+        # 새 key로 슬라이더를 재생성하여 화면도 전체기간으로 즉시 초기화
+        st.session_state["year_month_slider_version"] = (
+            int(st.session_state.get("year_month_slider_version", 0)) + 1
+        )
+
     else:
-        st.session_state.pop("filter_year_month", None)
+        st.session_state.pop(
+            "year_month_slider_default",
+            None,
+        )
+        st.session_state.pop(
+            "year_month_slider_version",
+            None,
+        )
 
     st.session_state["filter_severity"] = []
     st.session_state["filter_accident_type"] = "전체"
@@ -5319,29 +5408,72 @@ with ai_tab:
                 }
 
                 /* ---------------------------------------------------------
-                큰 항목 제목
-                예: 1. 전략 판단
-                Markdown ## → h2
+                일반 AI 결과의 Markdown 제목
                 --------------------------------------------------------- */
                 div[data-testid="stExpander"]
                 div[data-testid="stMarkdownContainer"] h2 {
+                    font-size: 1.75rem !important;
+                    line-height: 1.35 !important;
+                    font-weight: 800 !important;
                     margin-top: 1.8rem !important;
                     margin-bottom: 0.8rem !important;
                 }
 
-                /* ---------------------------------------------------------
-                작은 소제목
-                예: 1) 우선 개입 판단
-                Markdown ### → h3
-
-                현재보다 위쪽 여백을 넓히고,
-                제목 아래 여백은 좁게 조정
-                --------------------------------------------------------- */
                 div[data-testid="stExpander"]
                 div[data-testid="stMarkdownContainer"] h3 {
+                    font-size: 1.4rem !important;
+                    line-height: 1.4 !important;
+                    font-weight: 750 !important;
                     margin-top: 1.4rem !important;
                     margin-bottom: 0.35rem !important;
                     padding-bottom: 0 !important;
+                }
+
+                /* ---------------------------------------------------------
+                AI 보고서 전용 제목·소제목
+                format_police_report_display()가 생성하는 HTML 클래스
+                --------------------------------------------------------- */
+                .police-report-title {
+                    font-size: 1.75rem !important;
+                    line-height: 1.35 !important;
+                    font-weight: 800 !important;
+                    color: #0F172A !important;
+                    margin-top: 0.4rem !important;
+                    margin-bottom: 1.1rem !important;
+                }
+
+                .police-report-subtitle {
+                    font-size: 1.4rem !important;
+                    line-height: 1.45 !important;
+                    font-weight: 750 !important;
+                    color: #1E293B !important;
+                    margin-top: 1.45rem !important;
+                    margin-bottom: 0.55rem !important;
+                }
+
+                .police-report-level2,
+                .police-report-level3,
+                .police-report-body {
+                    font-size: 1.2rem !important;
+                    line-height: 1.8 !important;
+                    color: #1F2937 !important;
+                }
+
+                .police-report-level2 {
+                    padding-left: 0.6rem !important;
+                    margin-top: 0.35rem !important;
+                    margin-bottom: 0.25rem !important;
+                }
+
+                .police-report-level3 {
+                    padding-left: 2.4rem !important;
+                    margin-top: 0.2rem !important;
+                    margin-bottom: 0.2rem !important;
+                }
+
+                .police-report-body {
+                    margin-top: 0.25rem !important;
+                    margin-bottom: 0.7rem !important;
                 }
 
                 /* 소제목 바로 다음 문단의 위쪽 여백 최소화 */

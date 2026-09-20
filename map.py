@@ -1343,6 +1343,7 @@ ranked_locations 순서대로 작성하되 단순 통계 복사는 피한다.
 ## 전략 판단
 사고가 '많은 것'과 '상해정도가 심각해지는 것'을 구분하고, 가장 먼저 개입해야 할 위험집단·시간·지점을 선정한다.
 선정 이유는 선택집단과 기준집단의 차이로 설명한다.
+첫 문장은 분석범위나 기준집단 설명이 아니라, 가장 우선해야 할 개입대상과 대응방향을 결론형으로 작성한다.
 
 ## 분야별 대응과제
 ### 🚔 경력배치 및 순찰
@@ -1428,6 +1429,9 @@ ranked_locations 순서대로 작성하되 단순 통계 복사는 피한다.
 → '어떤 활동을 할 것인지'
 → '어떻게 효과를 확인할 것인지'
 가 자연스럽게 연결되도록 작성한다.
+
+추진 방안에는 분석범위나 단순 수치 비교가 아닌,
+가장 우선해야 할 대상·시간·지점과 구체적인 대응방향이 드러나는 문장을 반드시 포함한다.
 
 선택집단과 기준집단을 비교하여
 단순히 사고가 많은 현상과 상대적으로 특이한 현상을 구분한다.
@@ -2068,31 +2072,87 @@ def strip_first_markdown_title(report_text):
 
 
 def extract_ai_report_summary(report_text, report_type):
-    """생성 결과에서 브리핑 상단에 표시할 대표 판단 한 문장을 찾는다."""
+    """생성 결과에서 현황 설명보다 실행가치가 높은 대표 판단을 찾는다."""
     lines = [line.strip() for line in str(report_text or "").splitlines()]
     preferred_sections = {
         "insight": ("실무자가 주목할 결론", "핵심 인사이트"),
         "hotspot": ("지점 간 비교", "관리유형", "지점별 진단"),
-        "strategy": ("전략 판단", "시행 우선순위"),
-        "police_report": ("현황 및 문제점", "추진 방안"),
+        "strategy": ("시행 우선순위", "전략 판단", "분야별 대응과제"),
+        "police_report": ("추진 방안", "향후 계획", "현황 및 문제점"),
     }
 
-    start_index = 0
-    for section_name in preferred_sections.get(report_type, ()):
-        matched_index = next(
-            (
-                index for index, line in enumerate(lines)
-                if section_name in line.lstrip("#ㅁ□■▪ 0123456789.")
-            ),
-            None,
-        )
-        if matched_index is not None:
-            start_index = matched_index + 1
-            break
+    action_terms = (
+        "우선", "집중", "강화", "배치", "단속", "순찰", "점검",
+        "개선", "관리", "시행", "추진", "조정", "교육", "홍보",
+        "예방", "저감", "확인", "협의",
+    )
+    weak_summary_terms = (
+        "분석대상", "선택조건", "기준집단", "분석 범위",
+        "동일 기간", "전체 사고", "주된 기준선", "총 ",
+    )
 
-    candidates = lines[start_index:] + lines[:start_index]
-    for line in candidates:
-        cleaned = re.sub(r"^[#ㅁ□■▪ㅇ○◦\-*•·\s]+", "", line).strip()
+    def clean_line(line):
+        return re.sub(
+            r"^[#ㅁ□■▪ㅇ○◦\-*•·\s0123456789.]+",
+            "",
+            line,
+        ).strip()
+
+    scored_candidates = []
+    section_names = preferred_sections.get(report_type, ())
+
+    for section_priority, section_name in enumerate(section_names):
+        matched_indices = [
+            index for index, line in enumerate(lines)
+            if section_name in line.lstrip("#ㅁ□■▪ 0123456789.")
+        ]
+
+        for matched_index in matched_indices:
+            for line_index in range(matched_index + 1, len(lines)):
+                raw_line = lines[line_index]
+
+                # 다음 대항목에 도달하면 현재 구간 탐색을 마친다.
+                if line_index > matched_index + 1 and (
+                    raw_line.startswith("## ")
+                    or raw_line.startswith("ㅁ")
+                ):
+                    break
+
+                cleaned = clean_line(raw_line)
+                if not cleaned or len(cleaned) < 18:
+                    continue
+                if cleaned.startswith(
+                    ("분석 범위", "분석 개요", "핵심 인사이트")
+                ):
+                    continue
+
+                # 앞쪽 우선구간과 실행 가능한 대응 문장에 가점을 준다.
+                score = 60 - (section_priority * 15)
+                score += sum(
+                    7 for term in action_terms if term in cleaned
+                )
+                score -= sum(
+                    12 for term in weak_summary_terms if term in cleaned
+                )
+
+                # 숫자·비율만 설명하는 문장이 핵심 판단이 되는 것을 방지한다.
+                if re.search(r"\d[\d,.]*건", cleaned) and not any(
+                    term in cleaned for term in action_terms
+                ):
+                    score -= 18
+                if len(cleaned) > 260:
+                    score -= 5
+
+                scored_candidates.append(
+                    (score, -line_index, cleaned)
+                )
+
+    if scored_candidates:
+        return max(scored_candidates)[2][:240]
+
+    # 정형화된 소제목이 없는 과거 저장 보고서를 위한 기존 방식의 보완 경로
+    for line in lines:
+        cleaned = clean_line(line)
         if not cleaned or len(cleaned) < 18:
             continue
         if cleaned.startswith(("분석 범위", "분석 개요", "핵심 인사이트")):

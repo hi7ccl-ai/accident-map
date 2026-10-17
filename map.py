@@ -1,6 +1,5 @@
 import geopandas as gpd
 import hashlib
-import hmac
 import json
 import urllib.error
 import urllib.parse
@@ -8122,17 +8121,13 @@ if selected_page == "AI 리포트":
         """
         AI 보고서 버튼 클릭 콜백
 
-        - 현재 브라우저 세션에서 인증한 경우 즉시 생성 대기
-        - 인증하지 않은 경우 비밀번호 입력 대상으로 저장
-        - 기존 저장 보고서 열람에는 영향을 주지 않음
+        - 클릭한 보고서 유형을 현재 선택 상태로 저장
+        - 실제 AI 생성을 pending 상태로 저장
+        - 기존 저장 보고서 열람 상태와는 직접 연결하지 않음
         """
 
-        if st.session_state.get("ai_report_unlocked", False):
-            st.session_state["selected_ai_report_type"] = report_type
-            st.session_state["pending_ai_report_type"] = report_type
-            return
-
-        st.session_state["ai_report_auth_target"] = report_type
+        st.session_state["selected_ai_report_type"] = report_type
+        st.session_state["pending_ai_report_type"] = report_type
 
 
     # ------------------------------------------------------------
@@ -8176,73 +8171,6 @@ if selected_page == "AI 리포트":
                 on_click=queue_ai_report,
                 args=(report_type,),
             )
-
-    # ------------------------------------------------------------
-    # AI 보고서 생성 비밀번호 확인
-    # - 기존 저장 보고서는 비밀번호 없이 열람 가능
-    # - 새 보고서 생성에만 비밀번호 적용
-    # - 한 번 인증하면 현재 브라우저 세션 동안 재입력 생략
-    # ------------------------------------------------------------
-    auth_target = st.session_state.get("ai_report_auth_target")
-
-    if auth_target is not None:
-        auth_report_info = ai_report_types.get(auth_target, {})
-
-        with st.form(
-            "ai_report_password_form",
-            clear_on_submit=True,
-        ):
-            st.info(
-                f"'{auth_report_info.get('card_title', 'AI 보고서')}'를 "
-                "새로 작성하려면 비밀번호를 입력하세요."
-            )
-
-            entered_report_password = st.text_input(
-                "보고서 작성 비밀번호",
-                type="password",
-                placeholder="비밀번호 입력",
-            )
-
-            auth_submit_col, auth_cancel_col = st.columns(2)
-
-            with auth_submit_col:
-                password_submitted = st.form_submit_button(
-                    "확인",
-                    type="primary",
-                    use_container_width=True,
-                )
-
-            with auth_cancel_col:
-                password_cancelled = st.form_submit_button(
-                    "취소",
-                    use_container_width=True,
-                )
-
-        if password_submitted:
-            configured_report_password = str(
-                st.secrets.get("AI_REPORT_PASSWORD", "")
-            )
-
-            if not configured_report_password:
-                st.error(
-                    "Streamlit Secrets에 AI_REPORT_PASSWORD를 "
-                    "등록하세요."
-                )
-            elif hmac.compare_digest(
-                entered_report_password,
-                configured_report_password,
-            ):
-                st.session_state["ai_report_unlocked"] = True
-                st.session_state["selected_ai_report_type"] = auth_target
-                st.session_state["pending_ai_report_type"] = auth_target
-                st.session_state.pop("ai_report_auth_target", None)
-                st.rerun()
-            else:
-                st.error("비밀번호가 올바르지 않습니다.")
-
-        if password_cancelled:
-            st.session_state.pop("ai_report_auth_target", None)
-            st.rerun()
 
     # ------------------------------------------------------------
     # 필터 결과가 없는 경우
